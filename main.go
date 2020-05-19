@@ -18,7 +18,7 @@ func main() {
 	remote := flag.String("r", "", "remote addr")
 	local := flag.String("l", "", "local addr")
 	key := flag.Int("key", 0, "key")
-	compress := flag.Bool("compress", false, "compress")
+	compress := flag.Int("compress", 0, "compress size")
 	nolog := flag.Int("nolog", 0, "write log file")
 	noprint := flag.Int("noprint", 0, "print stdout")
 	loglevel := flag.String("loglevel", "info", "log level")
@@ -38,6 +38,13 @@ func main() {
 		}
 	}
 
+	if *t == "server" {
+		if len(*local) == 0 {
+			flag.Usage()
+			return
+		}
+	}
+
 	level := loggo.LEVEL_INFO
 	if loggo.NameToLevel(*loglevel) >= 0 {
 		level = loggo.NameToLevel(*loglevel)
@@ -52,7 +59,7 @@ func main() {
 	loggo.Info("start...")
 
 	if *t == "server" {
-		s, err := NewServer(*key)
+		s, err := NewServer(*key, *local)
 		if err != nil {
 			loggo.Error("NewServer fail: %s", err.Error())
 			return
