@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	MAX_MSG_SIZE  = 1024 * 1024
-	LOGIN_TIMEOUT = 10
-	HB_INTER      = 1
+	MAX_MSG_SIZE       = 1024 * 1024
+	LOGIN_TIMEOUT      = 10
+	PING_INTER         = 1
+	PING_TIMEOUT_INTER = 5
 )
 
 func MarshalSrpFrame(f *SrpFrame, compress int) ([]byte, error) {
@@ -27,6 +28,39 @@ func MarshalSrpFrame(f *SrpFrame, compress int) ([]byte, error) {
 			f.DataFrame.Data = newb
 			f.DataFrame.Compress = true
 		}
+	}
+
+	switch f.Type {
+	case SrpFrame_LOGIN:
+		if f.LoginFrame == nil {
+			return nil, errors.New("LoginFrame nil")
+		}
+	case SrpFrame_LOGINRSP:
+		if f.LoginRspFrame == nil {
+			return nil, errors.New("LoginRspFrame nil")
+		}
+	case SrpFrame_DATA:
+		if f.DataFrame == nil {
+			return nil, errors.New("DataFrame nil")
+		}
+	case SrpFrame_PING:
+		if f.PingFrame == nil {
+			return nil, errors.New("PingFrame nil")
+		}
+	case SrpFrame_PONG:
+		if f.PongFrame == nil {
+			return nil, errors.New("PongFrame nil")
+		}
+	case SrpFrame_OPEN:
+		if f.OpenFrame == nil {
+			return nil, errors.New("OpenFrame nil")
+		}
+	case SrpFrame_CLOSE:
+		if f.CloseFrame == nil {
+			return nil, errors.New("CloseFrame nil")
+		}
+	default:
+		return nil, errors.New("Type error")
 	}
 
 	mb, err := proto.Marshal(f)
@@ -73,6 +107,7 @@ func recvFrom(ctx context.Context, wg *errgroup.Group, recvch chan<- *SrpFrame, 
 			}
 
 			recvch <- f
+			//loggo.Info("recvFrom %s %s", conn.RemoteAddr().String(), f.Type.String())
 		}
 	}
 }
@@ -106,6 +141,8 @@ func sendTo(ctx context.Context, wg *errgroup.Group, sendch <-chan *SrpFrame, co
 				loggo.Error("sendTo Write fail: %s %s", conn.RemoteAddr().String(), err.Error())
 				return err
 			}
+
+			//loggo.Info("sendTo %s %s", conn.RemoteAddr().String(), f.Type.String())
 		}
 	}
 }
