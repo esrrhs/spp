@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"github.com/esrrhs/go-engine/src/common"
 	"github.com/esrrhs/go-engine/src/loggo"
 	"golang.org/x/sync/errgroup"
 	"net"
 	"sync"
+	"time"
 )
 
 type ClientConn struct {
@@ -20,7 +22,7 @@ type Server struct {
 	key        int
 	addr       *net.TCPAddr
 	listenConn *net.TCPListener
-	lock       sync.Mutex
+	clients    sync.Map
 }
 
 func NewServer(key int, local string) (*Server, error) {
@@ -85,11 +87,19 @@ func (s *Server) loopClient(clientconn *ClientConn) {
 		return s.process(ctx, wg, sendch, recvch, clientconn)
 	})
 
+	wg.Go(func() error {
+		time.Sleep(time.Second * LOGIN_TIMEOUT)
+		if !clientconn.logined {
+			return errors.New("login timeout")
+		}
+		return nil
+	})
+
 	wg.Wait()
 	clientconn.conn.Close()
 }
 
-func (s *Server) process(ctx context.Context, group *errgroup.Group, sendch chan<- *SrpFrame, recvch <-chan *SrpFrame, clientconn *ClientConn) error {
+func (s *Server) process(ctx context.Context, wg *errgroup.Group, sendch chan<- *SrpFrame, recvch <-chan *SrpFrame, clientconn *ClientConn) error {
 	defer common.CrashLog()
 
 	for {
@@ -99,15 +109,16 @@ func (s *Server) process(ctx context.Context, group *errgroup.Group, sendch chan
 		case f := <-recvch:
 			switch f.Type {
 			case SrpFrame_LOGIN:
-				s.loginRspClient(f, sendch, clientconn)
+				s.processLogin(f, sendch, clientconn)
 			}
 		}
 	}
 
 }
 
-func (s *Server) loginRspClient(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+func (s *Server) processLogin(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
 	rf := &SrpFrame{}
+	f.Type = SrpFrame_LOGINRSP
 	rf.LoginRspFrame = &SrpLoginRspFrame{}
 
 	if clientconn.logined {
@@ -117,7 +128,20 @@ func (s *Server) loginRspClient(f *SrpFrame, sendch chan<- *SrpFrame, clientconn
 		return
 	}
 
-	s.lock.Lock()
-	defer s.lock.Unlock()
+	_, loaded := s.clients.LoadOrStore(f.LoginFrame.Remote, clientconn)
+	if loaded {
+		f.LoginRspFrame.Ret = false
+		f.LoginRspFrame.Msg = "other has login before"
+		sendch <- f
+		return
+	}
 
+	clientconn.compress = int(f.LoginFrame.Compress)
+	clientconn.remote = f.LoginFrame.Remote
+	clientconn.logined = true
+
+	f.LoginRspFrame.Ret = true
+	f.LoginRspFrame.Msg = "ok"
+	sendch <- f
+	return
 }

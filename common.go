@@ -14,7 +14,9 @@ import (
 )
 
 const (
-	MAX_MSG_SIZE = 1024 * 1024
+	MAX_MSG_SIZE  = 1024 * 1024
+	LOGIN_TIMEOUT = 10
+	HB_INTER      = 1
 )
 
 func MarshalSrpFrame(f *SrpFrame, compress int) ([]byte, error) {
