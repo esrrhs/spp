@@ -26,10 +26,11 @@ message SrpDataFrame {
 message SrpFrame {
     enum TYPE {
         LOGIN = 0;
-        DATA = 1;
-        HB = 2;
-        OPEN = 3;
-        CLOSR = 4;
+        LOGINRSP = 1;
+        DATA = 2;
+        HB = 3;
+        OPEN = 4;
+        CLOSE = 5;
     }
 
     TYPE type = 1;
