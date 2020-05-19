@@ -9,7 +9,10 @@ message SrpLoginRspFrame {
     bool ret = 1;
     string msg = 2;
 }
-message SrpHBFrame {
+message SrpPingFrame {
+    int64 time = 1;
+}
+message SrpPongFrame {
     int64 time = 1;
 }
 message SrpOpenFrame {
@@ -28,16 +31,18 @@ message SrpFrame {
         LOGIN = 0;
         LOGINRSP = 1;
         DATA = 2;
-        HB = 3;
-        OPEN = 4;
-        CLOSE = 5;
+        PING = 3;
+        PONG = 4;
+        OPEN = 5;
+        CLOSE = 6;
     }
 
     TYPE type = 1;
     SrpLoginFrame loginFrame = 2;
     SrpLoginRspFrame loginRspFrame = 3;
     SrpDataFrame dataFrame = 4;
-    SrpHBFrame hbFrame = 5;
-    SrpOpenFrame openFrame = 6;
-    SrpCloseFrame closeFrame = 7;
+    SrpPingFrame pingFrame = 5;
+    SrpPongFrame pongFrame = 6;
+    SrpOpenFrame openFrame = 7;
+    SrpCloseFrame closeFrame = 8;
 }

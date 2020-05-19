@@ -11,9 +11,10 @@ import (
 )
 
 type ServerConn struct {
-	conn    *net.TCPConn
-	logined bool
-	lastHB  time.Time
+	conn     *net.TCPConn
+	logined  bool
+	lastHB   time.Time
+	pingsend int
 }
 
 type Client struct {
@@ -89,9 +90,9 @@ func (c *Client) connectServer() {
 func (c *Client) loopServer(serverconn *ServerConn) {
 	defer common.CrashLog()
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	wg, _ := errgroup.WithContext(ctx)
+	loggo.Info("new server conn from %s", serverconn.conn.RemoteAddr().String())
+
+	wg, ctx := errgroup.WithContext(context.Background())
 
 	sendch := make(chan *SrpFrame, 1024)
 	recvch := make(chan *SrpFrame, 1024)
@@ -117,6 +118,11 @@ func (c *Client) loopServer(serverconn *ServerConn) {
 	wg.Wait()
 	serverconn.conn.Close()
 	c.serverconn = nil
+	if serverconn.logined {
+		loggo.Info("close server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
+	} else {
+		loggo.Info("close invalid server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
+	}
 }
 
 func (c *Client) loginServer(sendch chan<- *SrpFrame) {
@@ -134,24 +140,43 @@ func (c *Client) loginServer(sendch chan<- *SrpFrame) {
 func (c *Client) checkActive(ctx context.Context, wg *errgroup.Group, sendch chan<- *SrpFrame, recvch <-chan *SrpFrame, serverconn *ServerConn) error {
 	defer common.CrashLog()
 
-	time.Sleep(time.Second * LOGIN_TIMEOUT)
-	if !serverconn.logined {
-		return errors.New("login timeout")
+	n := 0
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(time.Second):
+		n++
+		if !serverconn.logined {
+			if n > LOGIN_TIMEOUT {
+				loggo.Error("checkActive login timeout %s %s", c.server, serverconn.conn.RemoteAddr().String())
+				return errors.New("login timeout")
+			}
+		} else {
+			break
+		}
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(HB_INTER * time.Second):
-			f := &SrpFrame{}
-			f.Type = SrpFrame_HB
-			f.HbFrame = &SrpHBFrame{}
-			sendch <- f
+		case <-time.After(PING_INTER * time.Second):
+			if serverconn.pingsend > PING_TIMEOUT_INTER {
+				loggo.Error("checkActive ping pong timeout %s %s", c.server, serverconn.conn.RemoteAddr().String())
+				return errors.New("ping pong timeout")
+			}
 
+			f := &SrpFrame{}
+			f.Type = SrpFrame_PING
+			f.PingFrame = &SrpPingFrame{}
+			f.PingFrame.Time = time.Now().UnixNano()
+			sendch <- f
+			serverconn.pingsend++
+			loggo.Info("ping %s %s", c.server, serverconn.conn.RemoteAddr().String())
 		}
 	}
 }
+
 func (c *Client) process(ctx context.Context, wg *errgroup.Group, sendch chan<- *SrpFrame, recvch <-chan *SrpFrame, serverconn *ServerConn) error {
 	defer common.CrashLog()
 
@@ -163,6 +188,12 @@ func (c *Client) process(ctx context.Context, wg *errgroup.Group, sendch chan<- 
 			switch f.Type {
 			case SrpFrame_LOGINRSP:
 				c.processLoginRsp(f, sendch, serverconn)
+
+			case SrpFrame_PING:
+				c.processPing(f, sendch, serverconn)
+
+			case SrpFrame_PONG:
+				c.processPong(f, sendch, serverconn)
 			}
 		}
 	}
@@ -176,4 +207,18 @@ func (c *Client) processLoginRsp(f *SrpFrame, sendch chan<- *SrpFrame, servercon
 	} else {
 		loggo.Error("login rsp fail %s %s", c.server, f.LoginRspFrame.Msg)
 	}
+}
+
+func (c *Client) processPing(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
+	rf := &SrpFrame{}
+	rf.Type = SrpFrame_PONG
+	rf.PongFrame = &SrpPongFrame{}
+	rf.PongFrame.Time = f.PingFrame.Time
+	sendch <- rf
+}
+
+func (c *Client) processPong(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
+	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
+	serverconn.pingsend = 0
+	loggo.Info("pong from %s %s %s", c.server, serverconn.conn.RemoteAddr().String(), elapse.String())
 }
