@@ -12,11 +12,12 @@ import (
 )
 
 type ClientConn struct {
-	conn     *net.TCPConn
-	compress int
-	logined  bool
-	remote   string
-	pingsend int
+	conn       *net.TCPConn
+	compress   int
+	logined    bool
+	remote     string
+	pingsend   int
+	listenConn *net.TCPListener
 }
 
 type Server struct {
@@ -96,6 +97,7 @@ func (s *Server) loopClient(clientconn *ClientConn) {
 	clientconn.conn.Close()
 	if clientconn.logined {
 		s.clients.Delete(clientconn.remote)
+		clientconn.listenConn.Close()
 		loggo.Info("close client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
 	} else {
 		loggo.Info("close invalid client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
@@ -189,9 +191,28 @@ func (s *Server) processLogin(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *
 		return
 	}
 
+	addr, err := net.ResolveTCPAddr("tcp", f.LoginFrame.Remote)
+	if err != nil {
+		f.LoginRspFrame.Ret = false
+		f.LoginRspFrame.Msg = "ResolveTCPAddr fail"
+		sendch <- f
+		loggo.Error("processLogin ResolveTCPAddr fail %s %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr(), err.Error())
+		return
+	}
+
+	listenConn, err := net.ListenTCP("tcp", addr)
+	if err != nil {
+		f.LoginRspFrame.Ret = false
+		f.LoginRspFrame.Msg = "ResolveTCPAddr fail"
+		sendch <- f
+		loggo.Error("processLogin ListenTCP fail %s %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr(), err.Error())
+		return
+	}
+
 	clientconn.compress = int(f.LoginFrame.Compress)
 	clientconn.remote = f.LoginFrame.Remote
 	clientconn.logined = true
+	clientconn.listenConn = listenConn
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
