@@ -1,28 +1,29 @@
 syntax = "proto3";
 option go_package = "main";
 
-message FrpLoginFrame {
+message SrpLoginFrame {
     string remote = 1;
+    int32 compress = 2;
 }
-message FrpLoginRspFrame {
+message SrpLoginRspFrame {
     bool ret = 1;
     string msg = 2;
 }
-message FrpHBFrame {
+message SrpHBFrame {
     int64 time = 1;
 }
-message FrpOpenFrame {
+message SrpOpenFrame {
     string id = 1;
 }
-message FrpCloseFrame {
+message SrpCloseFrame {
     string id = 1;
 }
-message FrpDataFrame {
+message SrpDataFrame {
     string id = 1;
     bool compress = 2;
     bytes data = 3;
 }
-message FrpFrame {
+message SrpFrame {
     enum TYPE {
         LOGIN = 0;
         DATA = 1;
@@ -31,11 +32,11 @@ message FrpFrame {
         CLOSR = 4;
     }
 
-    int32 type = 1;
-    FrpLoginFrame loginFrame = 2;
-    FrpLoginRspFrame loginRspFrame = 3;
-    FrpDataFrame dataFrame = 4;
-    FrpHBFrame hbFrame = 5;
-    FrpOpenFrame openFrame = 6;
-    FrpCloseFrame closeFrame = 7;
+    TYPE type = 1;
+    SrpLoginFrame loginFrame = 2;
+    SrpLoginRspFrame loginRspFrame = 3;
+    SrpDataFrame dataFrame = 4;
+    SrpHBFrame hbFrame = 5;
+    SrpOpenFrame openFrame = 6;
+    SrpCloseFrame closeFrame = 7;
 }

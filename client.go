@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"github.com/esrrhs/go-engine/src/common"
 	"github.com/esrrhs/go-engine/src/loggo"
+	"golang.org/x/sync/errgroup"
 	"net"
 	"time"
 )
@@ -12,14 +14,14 @@ type Client struct {
 	server     string
 	local      string
 	remote     string
-	compress   bool
+	compress   int
 	serveraddr *net.TCPAddr
 	localaddr  *net.TCPAddr
 
 	serverconn *net.TCPConn
 }
 
-func NewClient(key int, server string, local string, remote string, compress bool) (*Client, error) {
+func NewClient(key int, server string, local string, remote string, compress int) (*Client, error) {
 
 	serveraddr, err := net.ResolveTCPAddr("tcp", server)
 	if err != nil {
@@ -53,6 +55,7 @@ func (c *Client) Run() error {
 
 	go c.connectServer()
 
+	return nil
 }
 
 func (c *Client) connectServer() {
@@ -63,7 +66,7 @@ func (c *Client) connectServer() {
 		if c.serverconn == nil {
 			targetconn, err := net.DialTCP("tcp", nil, c.serveraddr)
 			if err != nil {
-				loggo.Error("connectServer fail: %s %s", c.serveraddr, err.Error())
+				loggo.Error("connectServer DialTCP fail: %s %s", c.serveraddr, err.Error())
 				time.Sleep(time.Second)
 				continue
 			}
@@ -77,25 +80,35 @@ func (c *Client) connectServer() {
 }
 
 func (c *Client) loopServer(serverconn *net.TCPConn) {
+	defer common.CrashLog()
 
-	defer serverconn.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	wg, _ := errgroup.WithContext(ctx)
 
-	c.loginServer()
+	sendch := make(chan *SrpFrame, 1024)
+	recvch := make(chan *SrpFrame, 1024)
 
-	go c.recvFromServer(serverconn)
-	c.sendToServer(serverconn)
+	c.loginServer(sendch)
 
+	wg.Go(func() error {
+		return recvFrom(ctx, wg, recvch, serverconn)
+	})
+
+	wg.Go(func() error {
+		return sendTo(ctx, wg, sendch, serverconn, c.compress)
+	})
+
+	wg.Wait()
+	serverconn.Close()
 	c.serverconn = nil
 }
 
-func (c *Client) loginServer() {
+func (c *Client) loginServer(sendch chan<- *SrpFrame) {
+	f := &SrpFrame{}
+	f.LoginFrame = &SrpLoginFrame{}
+	f.LoginFrame.Remote = c.remote
+	f.LoginFrame.Compress = int32(c.compress)
 
-}
-
-func (c *Client) recvFromServer(conn *net.TCPConn) {
-
-}
-
-func (c *Client) sendToServer(conn *net.TCPConn) {
-
+	sendch <- f
 }
