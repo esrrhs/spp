@@ -15,9 +15,12 @@ import (
 
 const (
 	MAX_MSG_SIZE       = 1024 * 1024
+	MAIN_BUFFER        = 1024 * 1024
+	CONN_BUFFER        = 1024
 	LOGIN_TIMEOUT      = 10
 	PING_INTER         = 1
 	PING_TIMEOUT_INTER = 5
+	CONN_TIMEOUT       = 300
 )
 
 func MarshalSrpFrame(f *SrpFrame, compress int) ([]byte, error) {

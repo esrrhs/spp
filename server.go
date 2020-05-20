@@ -11,13 +11,24 @@ import (
 	"time"
 )
 
+type ClientConnSonny struct {
+	conn   *net.TCPConn
+	id     string
+	sendch chan *SrpFrame
+	recvch chan *SrpFrame
+	active int64
+}
+
 type ClientConn struct {
-	conn       *net.TCPConn
-	compress   int
-	logined    bool
-	remote     string
-	pingsend   int
-	listenConn *net.TCPListener
+	conn        *net.TCPConn
+	compress    int
+	logined     bool
+	remote      string
+	pingsend    int
+	sendch      chan *SrpFrame
+	recvch      chan *SrpFrame
+	listenConn  *net.TCPListener
+	clientsonny sync.Map
 }
 
 type Server struct {
@@ -48,34 +59,37 @@ func NewServer(key int, local string) (*Server, error) {
 }
 
 func (s *Server) Run() error {
-	go s.serveClient()
+	go s.listenClient()
 	return nil
 }
 
-func (s *Server) serveClient() {
+func (s *Server) listenClient() {
 
 	defer common.CrashLog()
 
 	for {
 		conn, err := s.listenConn.Accept()
 		if err != nil {
-			loggo.Error("serveClient Accept fail: %s %s", s.addr, err.Error())
+			loggo.Error("listenClient Accept fail: %s %s", s.addr, err.Error())
 			continue
 		}
 		clientconn := &ClientConn{conn: conn.(*net.TCPConn)}
-		go s.loopClient(clientconn)
+		go s.loopClientConn(clientconn)
 	}
 }
 
-func (s *Server) loopClient(clientconn *ClientConn) {
+func (s *Server) loopClientConn(clientconn *ClientConn) {
 	defer common.CrashLog()
 
-	loggo.Info("accept new client from %s", clientconn.conn.RemoteAddr().String())
+	loggo.Info("loopClientConn accept new client from %s", clientconn.conn.RemoteAddr().String())
 
 	wg, ctx := errgroup.WithContext(context.Background())
 
-	sendch := make(chan *SrpFrame, 1024)
-	recvch := make(chan *SrpFrame, 1024)
+	sendch := make(chan *SrpFrame, MAIN_BUFFER)
+	recvch := make(chan *SrpFrame, MAIN_BUFFER)
+
+	clientconn.sendch = sendch
+	clientconn.recvch = recvch
 
 	wg.Go(func() error {
 		return recvFrom(ctx, wg, recvch, clientconn.conn)
@@ -98,9 +112,9 @@ func (s *Server) loopClient(clientconn *ClientConn) {
 	if clientconn.logined {
 		s.clients.Delete(clientconn.remote)
 		clientconn.listenConn.Close()
-		loggo.Info("close client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
+		loggo.Info("loopClientConn close client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
 	} else {
-		loggo.Info("close invalid client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
+		loggo.Info("loopClientConn close invalid client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
 	}
 }
 
@@ -154,20 +168,23 @@ func (s *Server) process(ctx context.Context, wg *errgroup.Group, sendch chan<- 
 		case f := <-recvch:
 			switch f.Type {
 			case SrpFrame_LOGIN:
-				s.processLogin(f, sendch, clientconn)
+				s.processLogin(ctx, f, sendch, clientconn)
 
 			case SrpFrame_PING:
-				s.processPing(f, sendch, clientconn)
+				s.processPing(ctx, f, sendch, clientconn)
 
 			case SrpFrame_PONG:
-				s.processPong(f, sendch, clientconn)
+				s.processPong(ctx, f, sendch, clientconn)
+
+			case SrpFrame_DATA:
+				s.processData(ctx, f, sendch, clientconn)
 			}
 		}
 	}
 
 }
 
-func (s *Server) processLogin(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+func (s *Server) processLogin(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
 	loggo.Info("processLogin from %s %s", clientconn.conn.RemoteAddr(), f.LoginFrame.Remote)
 
 	rf := &SrpFrame{}
@@ -214,6 +231,8 @@ func (s *Server) processLogin(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *
 	clientconn.logined = true
 	clientconn.listenConn = listenConn
 
+	go s.listenClientConn(ctx, clientconn)
+
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
 	sendch <- rf
@@ -221,7 +240,7 @@ func (s *Server) processLogin(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *
 	loggo.Info("processLogin ok %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr())
 }
 
-func (s *Server) processPing(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+func (s *Server) processPing(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
 	rf := &SrpFrame{}
 	rf.Type = SrpFrame_PONG
 	rf.PongFrame = &SrpPongFrame{}
@@ -229,8 +248,122 @@ func (s *Server) processPing(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *C
 	sendch <- rf
 }
 
-func (s *Server) processPong(f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+func (s *Server) processPong(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	clientconn.pingsend = 0
 	loggo.Info("pong from %s %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String(), elapse.String())
+}
+
+func (s *Server) processData(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+	id := f.DataFrame.Id
+	v, ok := clientconn.clientsonny.Load(id)
+	if !ok {
+		return
+	}
+	clientconnsonny := v.(*ClientConnSonny)
+	clientconnsonny.sendch <- f
+	clientconnsonny.active++
+}
+
+func (s *Server) listenClientConn(ctx context.Context, clientconn *ClientConn) {
+
+	defer common.CrashLog()
+
+	for {
+		conn, err := clientconn.listenConn.Accept()
+		if err != nil {
+			loggo.Error("listenClientConn Accept fail: %s %s", s.addr, err.Error())
+			continue
+		}
+		clientconnsonny := &ClientConnSonny{conn: conn.(*net.TCPConn)}
+		go s.loopClientConnSonny(ctx, clientconn, clientconnsonny)
+	}
+
+}
+
+func (s *Server) loopClientConnSonny(fctx context.Context, clientconn *ClientConn, clientconnsonny *ClientConnSonny) {
+
+	defer common.CrashLog()
+
+	clientconnsonny.id = common.UniqueId()
+
+	loggo.Info("loopClientConnSonny %s accept new conn %s coming from %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
+
+	sendch := make(chan *SrpFrame, CONN_BUFFER)
+	recvch := make(chan *SrpFrame, CONN_BUFFER)
+
+	clientconnsonny.sendch = sendch
+	clientconnsonny.recvch = recvch
+
+	_, loaded := clientconn.clientsonny.LoadOrStore(clientconnsonny.id, clientconnsonny)
+	if loaded {
+		loggo.Error("loopClientConnSonny LoadOrStore fail %s %s", clientconn.remote, clientconnsonny.id)
+		clientconnsonny.conn.Close()
+		return
+	}
+
+	wg, ctx := errgroup.WithContext(fctx)
+
+	s.openClientConnSonny(ctx, clientconn, clientconnsonny)
+
+	wg.Go(func() error {
+		return recvFrom(ctx, wg, recvch, clientconnsonny.conn)
+	})
+
+	wg.Go(func() error {
+		return sendTo(ctx, wg, sendch, clientconnsonny.conn, clientconn.compress)
+	})
+
+	wg.Go(func() error {
+		return s.transferClientConnSonnyRecv(ctx, wg, recvch, clientconn, clientconnsonny)
+	})
+
+	wg.Go(func() error {
+		return s.checkClientConnSonnyActive(ctx, wg, clientconn, clientconnsonny)
+	})
+
+	wg.Wait()
+
+	loggo.Info("loopClientConnSonny %s close conn %s coming from %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
+	clientconn.clientsonny.Delete(clientconnsonny.id)
+	clientconnsonny.conn.Close()
+}
+
+func (s *Server) openClientConnSonny(ctx context.Context, clientconn *ClientConn, clientconnsonny *ClientConnSonny) {
+	f := &SrpFrame{}
+	f.Type = SrpFrame_OPEN
+	f.OpenFrame = &SrpOpenFrame{}
+	f.OpenFrame.Id = clientconnsonny.id
+
+	clientconn.sendch <- f
+}
+
+func (s *Server) transferClientConnSonnyRecv(ctx context.Context, wg *errgroup.Group, recvch <-chan *SrpFrame, clientconn *ClientConn, clientconnsonny *ClientConnSonny) error {
+	defer common.CrashLog()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case f := <-recvch:
+			clientconn.sendch <- f
+			clientconnsonny.active++
+		}
+	}
+}
+
+func (s *Server) checkClientConnSonnyActive(ctx context.Context, wg *errgroup.Group, clientconn *ClientConn, clientconnsonny *ClientConnSonny) error {
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(CONN_TIMEOUT * time.Second):
+			if clientconnsonny.active == 0 {
+				loggo.Error("checkClientConnSonnyActive timeout %s %s %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
+				return errors.New("conn timeout")
+			}
+			clientconnsonny.active = 0
+		}
+	}
 }
