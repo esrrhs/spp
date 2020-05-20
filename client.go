@@ -79,7 +79,7 @@ func (c *Client) connectServer() {
 				continue
 			}
 			c.serverconn = &ServerConn{conn: targetconn}
-			go c.loopServer(c.serverconn)
+			go c.loopServerConn(c.serverconn)
 		} else {
 			time.Sleep(time.Second)
 		}
@@ -87,15 +87,15 @@ func (c *Client) connectServer() {
 
 }
 
-func (c *Client) loopServer(serverconn *ServerConn) {
+func (c *Client) loopServerConn(serverconn *ServerConn) {
 	defer common.CrashLog()
 
-	loggo.Info("new server conn from %s", serverconn.conn.RemoteAddr().String())
+	loggo.Info("loopServerConn new server conn from %s", serverconn.conn.RemoteAddr().String())
 
 	wg, ctx := errgroup.WithContext(context.Background())
 
-	sendch := make(chan *SrpFrame, 1024)
-	recvch := make(chan *SrpFrame, 1024)
+	sendch := make(chan *SrpFrame, MAIN_BUFFER)
+	recvch := make(chan *SrpFrame, MAIN_BUFFER)
 
 	c.loginServer(sendch)
 
@@ -119,9 +119,9 @@ func (c *Client) loopServer(serverconn *ServerConn) {
 	serverconn.conn.Close()
 	c.serverconn = nil
 	if serverconn.logined {
-		loggo.Info("close server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
+		loggo.Info("loopServerConn close server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
 	} else {
-		loggo.Info("close invalid server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
+		loggo.Info("loopServerConn close invalid server conn from %s %s", c.server, serverconn.conn.RemoteAddr().String())
 	}
 }
 
@@ -187,20 +187,20 @@ func (c *Client) process(ctx context.Context, wg *errgroup.Group, sendch chan<- 
 		case f := <-recvch:
 			switch f.Type {
 			case SrpFrame_LOGINRSP:
-				c.processLoginRsp(f, sendch, serverconn)
+				c.processLoginRsp(ctx, f, sendch, serverconn)
 
 			case SrpFrame_PING:
-				c.processPing(f, sendch, serverconn)
+				c.processPing(ctx, f, sendch, serverconn)
 
 			case SrpFrame_PONG:
-				c.processPong(f, sendch, serverconn)
+				c.processPong(ctx, f, sendch, serverconn)
 			}
 		}
 	}
 
 }
 
-func (c *Client) processLoginRsp(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
+func (c *Client) processLoginRsp(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
 	if f.LoginRspFrame.Ret {
 		loggo.Info("login rsp ok %s", c.server)
 		serverconn.logined = true
@@ -209,7 +209,7 @@ func (c *Client) processLoginRsp(f *SrpFrame, sendch chan<- *SrpFrame, servercon
 	}
 }
 
-func (c *Client) processPing(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
+func (c *Client) processPing(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
 	rf := &SrpFrame{}
 	rf.Type = SrpFrame_PONG
 	rf.PongFrame = &SrpPongFrame{}
@@ -217,7 +217,7 @@ func (c *Client) processPing(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *S
 	sendch <- rf
 }
 
-func (c *Client) processPong(f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
+func (c *Client) processPong(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, serverconn *ServerConn) {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	serverconn.pingsend = 0
 	loggo.Info("pong from %s %s %s", c.server, serverconn.conn.RemoteAddr().String(), elapse.String())
