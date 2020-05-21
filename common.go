@@ -14,13 +14,14 @@ import (
 )
 
 const (
-	MAX_MSG_SIZE       = 1024 * 1024
-	MAIN_BUFFER        = 1024 * 1024
-	CONN_BUFFER        = 1024
-	LOGIN_TIMEOUT      = 10
-	PING_INTER         = 1
-	PING_TIMEOUT_INTER = 5
-	CONN_TIMEOUT       = 300
+	MAX_MSG_SIZE       = 1024 * 1024 // 消息最大长度
+	MAIN_BUFFER        = 1024 * 1024 // 主通道buffer最大长度
+	CONN_BUFFER        = 1024        // 每个conn buffer最大长度
+	LOGIN_TIMEOUT      = 10          // 主通道登录超时
+	PING_INTER         = 1           // 主通道ping间隔
+	PING_TIMEOUT_INTER = 5           // 主通道ping超时间隔
+	CONN_TIMEOUT       = 300         // 每个conn的不活跃超时时间
+	CONNNECT_TIMEOUT   = 10          // 每个conn的连接超时
 )
 
 func MarshalSrpFrame(f *SrpFrame, compress int) ([]byte, error) {

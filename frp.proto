@@ -18,6 +18,11 @@ message SrpPongFrame {
 message SrpOpenFrame {
     string id = 1;
 }
+message SrpOpenRspFrame {
+    string id = 1;
+    bool ret = 2;
+    string msg = 3;
+}
 message SrpCloseFrame {
     string id = 1;
 }
@@ -34,7 +39,8 @@ message SrpFrame {
         PING = 3;
         PONG = 4;
         OPEN = 5;
-        CLOSE = 6;
+        OPENRSP = 6;
+        CLOSE = 7;
     }
 
     TYPE type = 1;
@@ -44,5 +50,6 @@ message SrpFrame {
     SrpPingFrame pingFrame = 5;
     SrpPongFrame pongFrame = 6;
     SrpOpenFrame openFrame = 7;
-    SrpCloseFrame closeFrame = 8;
+    SrpOpenRspFrame openRspFrame = 8;
+    SrpCloseFrame closeFrame = 9;
 }
