@@ -12,11 +12,13 @@ import (
 )
 
 type ClientConnSonny struct {
-	conn   *net.TCPConn
-	id     string
-	sendch chan *SrpFrame
-	recvch chan *SrpFrame
-	active int64
+	conn      *net.TCPConn
+	id        string
+	sendch    chan *SrpFrame
+	recvch    chan *SrpFrame
+	active    int64
+	opened    bool
+	needclose bool
 }
 
 type ClientConn struct {
@@ -116,6 +118,8 @@ func (s *Server) loopClientConn(clientconn *ClientConn) {
 	} else {
 		loggo.Info("loopClientConn close invalid client from %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String())
 	}
+	close(sendch)
+	close(recvch)
 }
 
 func (s *Server) checkActive(ctx context.Context, wg *errgroup.Group, sendch chan<- *SrpFrame, recvch <-chan *SrpFrame, clientconn *ClientConn) error {
@@ -178,6 +182,9 @@ func (s *Server) process(ctx context.Context, wg *errgroup.Group, sendch chan<- 
 
 			case SrpFrame_DATA:
 				s.processData(ctx, f, sendch, clientconn)
+
+			case SrpFrame_OPENRSP:
+				s.processOpenRsp(ctx, f, sendch, clientconn)
 			}
 		}
 	}
@@ -192,36 +199,36 @@ func (s *Server) processLogin(ctx context.Context, f *SrpFrame, sendch chan<- *S
 	rf.LoginRspFrame = &SrpLoginRspFrame{}
 
 	if clientconn.logined {
-		f.LoginRspFrame.Ret = false
-		f.LoginRspFrame.Msg = "has login before"
-		sendch <- f
+		rf.LoginRspFrame.Ret = false
+		rf.LoginRspFrame.Msg = "has login before"
+		sendch <- rf
 		loggo.Error("processLogin fail has login before %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr())
 		return
 	}
 
 	_, loaded := s.clients.LoadOrStore(f.LoginFrame.Remote, clientconn)
 	if loaded {
-		f.LoginRspFrame.Ret = false
-		f.LoginRspFrame.Msg = "other has login before"
-		sendch <- f
+		rf.LoginRspFrame.Ret = false
+		rf.LoginRspFrame.Msg = "other has login before"
+		sendch <- rf
 		loggo.Error("processLogin fail other has login before %s %s", clientconn.conn.RemoteAddr(), f.LoginFrame.Remote)
 		return
 	}
 
 	addr, err := net.ResolveTCPAddr("tcp", f.LoginFrame.Remote)
 	if err != nil {
-		f.LoginRspFrame.Ret = false
-		f.LoginRspFrame.Msg = "ResolveTCPAddr fail"
-		sendch <- f
+		rf.LoginRspFrame.Ret = false
+		rf.LoginRspFrame.Msg = "ResolveTCPAddr fail"
+		sendch <- rf
 		loggo.Error("processLogin ResolveTCPAddr fail %s %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr(), err.Error())
 		return
 	}
 
 	listenConn, err := net.ListenTCP("tcp", addr)
 	if err != nil {
-		f.LoginRspFrame.Ret = false
-		f.LoginRspFrame.Msg = "ResolveTCPAddr fail"
-		sendch <- f
+		rf.LoginRspFrame.Ret = false
+		rf.LoginRspFrame.Msg = "ResolveTCPAddr fail"
+		sendch <- rf
 		loggo.Error("processLogin ListenTCP fail %s %s %s", f.LoginFrame.Remote, clientconn.conn.RemoteAddr(), err.Error())
 		return
 	}
@@ -263,6 +270,25 @@ func (s *Server) processData(ctx context.Context, f *SrpFrame, sendch chan<- *Sr
 	clientconnsonny := v.(*ClientConnSonny)
 	clientconnsonny.sendch <- f
 	clientconnsonny.active++
+}
+
+func (s *Server) processOpenRsp(ctx context.Context, f *SrpFrame, sendch chan<- *SrpFrame, clientconn *ClientConn) {
+
+	id := f.OpenRspFrame.Id
+
+	loggo.Info("open rsp from %s %s %s", clientconn.remote, clientconn.conn.RemoteAddr().String(), id, f.OpenRspFrame.Msg)
+
+	v, ok := clientconn.clientsonny.Load(id)
+	if !ok {
+		return
+	}
+	clientconnsonny := v.(*ClientConnSonny)
+
+	if f.OpenRspFrame.Ret {
+		clientconnsonny.opened = true
+	} else {
+		clientconnsonny.needclose = true
+	}
 }
 
 func (s *Server) listenClientConn(ctx context.Context, clientconn *ClientConn) {
@@ -322,11 +348,17 @@ func (s *Server) loopClientConnSonny(fctx context.Context, clientconn *ClientCon
 		return s.checkClientConnSonnyActive(ctx, wg, clientconn, clientconnsonny)
 	})
 
+	wg.Go(func() error {
+		return s.checkClientConnSonnyNeedClose(ctx, wg, clientconn, clientconnsonny)
+	})
+
 	wg.Wait()
 
 	loggo.Info("loopClientConnSonny %s close conn %s coming from %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
 	clientconn.clientsonny.Delete(clientconnsonny.id)
 	clientconnsonny.conn.Close()
+	close(sendch)
+	close(recvch)
 }
 
 func (s *Server) openClientConnSonny(ctx context.Context, clientconn *ClientConn, clientconnsonny *ClientConnSonny) {
@@ -354,6 +386,22 @@ func (s *Server) transferClientConnSonnyRecv(ctx context.Context, wg *errgroup.G
 
 func (s *Server) checkClientConnSonnyActive(ctx context.Context, wg *errgroup.Group, clientconn *ClientConn, clientconnsonny *ClientConnSonny) error {
 
+	n := 0
+	select {
+	case <-ctx.Done():
+		return nil
+	case <-time.After(time.Second):
+		n++
+		if !clientconnsonny.opened {
+			if n > CONNNECT_TIMEOUT {
+				loggo.Error("checkClientConnSonnyActive open timeout %s %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
+				return errors.New("open timeout")
+			}
+		} else {
+			break
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -364,6 +412,21 @@ func (s *Server) checkClientConnSonnyActive(ctx context.Context, wg *errgroup.Gr
 				return errors.New("conn timeout")
 			}
 			clientconnsonny.active = 0
+		}
+	}
+}
+
+func (s *Server) checkClientConnSonnyNeedClose(ctx context.Context, wg *errgroup.Group, clientconn *ClientConn, clientconnsonny *ClientConnSonny) error {
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(time.Second):
+			if clientconnsonny.needclose {
+				loggo.Error("checkClientConnSonnyNeedClose needclose %s %s %s", clientconn.remote, clientconnsonny.id, clientconnsonny.conn.RemoteAddr().String())
+				return errors.New("needclose")
+			}
 		}
 	}
 }
