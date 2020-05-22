@@ -4,8 +4,10 @@ import (
 	"flag"
 	"github.com/esrrhs/go-engine/src/common"
 	"github.com/esrrhs/go-engine/src/loggo"
+	"github.com/esrrhs/go-engine/src/proxy"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -13,12 +15,17 @@ func main() {
 
 	defer common.CrashLog()
 
-	t := flag.String("type", "", "client or server")
-	server := flag.String("s", "", "server addr")
-	remote := flag.String("r", "", "remote addr")
-	local := flag.String("l", "", "local addr")
-	key := flag.Int("key", 0, "key")
-	compress := flag.Int("compress", 0, "compress size")
+	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
+	proto := flag.String("proto", "tcp", "main proto type")
+	proxyproto := flag.String("proxyproto", "tcp", "proxy proto type: tcp/udp/rudp/ricmp")
+	listenaddr := flag.String("listen", "", "server listen addr")
+	name := flag.String("name", "", "client name")
+	server := flag.String("server", "", "server addr")
+	fromaddr := flag.String("from", "", "from addr")
+	toaddr := flag.String("to", "", "to addr")
+	key := flag.String("key", "", "verify key")
+	encrypt := flag.String("encrypt", "", "encrypt key, empty means off")
+	compress := flag.Int("compress", 0, "start compress size, 0 means off")
 	nolog := flag.Int("nolog", 0, "write log file")
 	noprint := flag.Int("noprint", 0, "print stdout")
 	loglevel := flag.String("loglevel", "info", "log level")
@@ -26,20 +33,33 @@ func main() {
 
 	flag.Parse()
 
-	if *t != "client" && *t != "server" {
+	if *t != "proxy_client" &&
+		*t != "reverse_proxy_client" &&
+		*t != "socks5_client" &&
+		*t != "reverse_socks5_client" &&
+		*t != "server" {
 		flag.Usage()
 		return
 	}
 
-	if *t == "client" {
-		if len(*remote) == 0 || len(*server) == 0 || len(*local) == 0 {
+	if *t != "proxy_client" &&
+		*t != "reverse_proxy_client" {
+		if len(*fromaddr) == 0 || len(*server) == 0 || len(*toaddr) == 0 {
+			flag.Usage()
+			return
+		}
+	}
+
+	if *t != "socks5_client" &&
+		*t != "reverse_socks5_client" {
+		if len(*fromaddr) == 0 || len(*server) == 0 {
 			flag.Usage()
 			return
 		}
 	}
 
 	if *t == "server" {
-		if len(*local) == 0 {
+		if len(*listenaddr) == 0 {
 			flag.Usage()
 			return
 		}
@@ -51,37 +71,35 @@ func main() {
 	}
 	loggo.Ini(loggo.Config{
 		Level:     level,
-		Prefix:    "srp",
+		Prefix:    "spp",
 		MaxDay:    3,
 		NoLogFile: *nolog > 0,
 		NoPrint:   *noprint > 0,
 	})
 	loggo.Info("start...")
 
+	config := proxy.DefaultConfig()
+	config.Compress = *compress
+	config.Key = *key
+	config.Encrypt = *encrypt
+	config.Proto = *proto
+
 	if *t == "server" {
-		s, err := NewServer(*key, *local)
+		_, err := proxy.NewServer(config, *listenaddr)
 		if err != nil {
-			loggo.Error("NewServer fail: %s", err.Error())
+			loggo.Error("main NewServer fail %s", err.Error())
 			return
 		}
 		loggo.Info("Server start")
-		err = s.Run()
-		if err != nil {
-			loggo.Error("Run fail: %s", err.Error())
-			return
-		}
 	} else {
-		c, err := NewClient(*key, *server, *local, *remote, *compress)
+		clienttypestr := strings.Replace(*t, "_client", "", -1)
+		clienttypestr = strings.ToUpper(clienttypestr)
+		_, err := proxy.NewClient(config, *server, *name, clienttypestr, *proxyproto, *fromaddr, *toaddr)
 		if err != nil {
-			loggo.Error("NewClient fail: %s", err.Error())
+			loggo.Error("main NewClient fail %s", err.Error())
 			return
 		}
-		loggo.Info("Server start")
-		err = c.Run()
-		if err != nil {
-			loggo.Error("Run fail: %s", err.Error())
-			return
-		}
+		loggo.Info("Client start")
 	}
 
 	if *profile > 0 {
