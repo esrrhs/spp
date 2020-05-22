@@ -1,2 +1,2 @@
-# srp
-A simple reverse proxy 
+# spp
+spp是一个简单强大的网络代理工具。
