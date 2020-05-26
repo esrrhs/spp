@@ -31,6 +31,7 @@ func main() {
 	noprint := flag.Int("noprint", 0, "print stdout")
 	loglevel := flag.String("loglevel", "info", "log level")
 	profile := flag.Int("profile", 0, "open profile")
+	ping := flag.Bool("ping", false, "show ping")
 
 	flag.Parse()
 
@@ -88,6 +89,7 @@ func main() {
 	config.Key = *key
 	config.Encrypt = *encrypt
 	config.Proto = *proto
+	config.ShowPing = *ping
 
 	if *t == "server" {
 		_, err := proxy.NewServer(config, *listenaddr)
