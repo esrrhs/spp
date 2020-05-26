@@ -2,6 +2,7 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"github.com/esrrhs/go-engine/src/common"
 	"github.com/esrrhs/go-engine/src/loggo"
 	"github.com/esrrhs/go-engine/src/proxy"
@@ -38,6 +39,7 @@ func main() {
 		*t != "socks5_client" &&
 		*t != "reverse_socks5_client" &&
 		*t != "server" {
+		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
 		flag.Usage()
 		return
 	}
@@ -45,6 +47,7 @@ func main() {
 	if *t != "proxy_client" &&
 		*t != "reverse_proxy_client" {
 		if len(*fromaddr) == 0 || len(*server) == 0 || len(*toaddr) == 0 {
+			fmt.Println("[proxy_client] or [reverse_proxy_client] need [server] [fromaddr] [toaddr]")
 			flag.Usage()
 			return
 		}
@@ -53,6 +56,7 @@ func main() {
 	if *t != "socks5_client" &&
 		*t != "reverse_socks5_client" {
 		if len(*fromaddr) == 0 || len(*server) == 0 {
+			fmt.Println("[socks5_client] or [reverse_socks5_client] need [server] [fromaddr]")
 			flag.Usage()
 			return
 		}
@@ -60,6 +64,7 @@ func main() {
 
 	if *t == "server" {
 		if len(*listenaddr) == 0 {
+			fmt.Println("[server] need [listenaddr]")
 			flag.Usage()
 			return
 		}
