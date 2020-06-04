@@ -32,6 +32,8 @@ func main() {
 	loglevel := flag.String("loglevel", "info", "log level")
 	profile := flag.Int("profile", 0, "open profile")
 	ping := flag.Bool("ping", false, "show ping")
+	username := flag.String("username", "", "socks5 username")
+	password := flag.String("password", "", "socks5 password")
 
 	flag.Parse()
 
@@ -90,6 +92,8 @@ func main() {
 	config.Encrypt = *encrypt
 	config.Proto = *proto
 	config.ShowPing = *ping
+	config.Username = *username
+	config.Password = *password
 
 	if *t == "server" {
 		_, err := proxy.NewServer(config, *listenaddr)
