@@ -17,7 +17,7 @@ func main() {
 	defer common.CrashLog()
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
-	proto := flag.String("proto", "tcp", "main proto type")
+	proto := flag.String("proto", "tcp", "main proto type: tcp/rudp/ricmp")
 	proxyproto := flag.String("proxyproto", "tcp", "proxy proto type: tcp/udp/rudp/ricmp")
 	listenaddr := flag.String("listen", "", "server listen addr")
 	name := flag.String("name", "", "client name")
@@ -36,6 +36,23 @@ func main() {
 	password := flag.String("password", "", "socks5 password")
 
 	flag.Parse()
+
+	if *proto != "tcp" &&
+		*proto != "rudp" &&
+		*proto != "ricmp" {
+		fmt.Println("[proto] must be tcp/rudp/ricmp\n")
+		flag.Usage()
+		return
+	}
+
+	if *proxyproto != "tcp" &&
+		*proxyproto != "udp" &&
+		*proxyproto != "rudp" &&
+		*proxyproto != "ricmp" {
+		fmt.Println("[proxyproto] tcp/udp/rudp/ricmp\n")
+		flag.Usage()
+		return
+	}
 
 	if *t != "proxy_client" &&
 		*t != "reverse_proxy_client" &&
