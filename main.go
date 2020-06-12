@@ -20,7 +20,7 @@ func main() {
 	proto := flag.String("proto", "tcp", "main proto type: tcp/rudp/ricmp")
 	proxyproto := flag.String("proxyproto", "tcp", "proxy proto type: tcp/udp/rudp/ricmp")
 	listenaddr := flag.String("listen", "", "server listen addr")
-	name := flag.String("name", "", "client name")
+	name := flag.String("name", "client", "client name")
 	server := flag.String("server", "", "server addr")
 	fromaddr := flag.String("fromaddr", "", "from addr")
 	toaddr := flag.String("toaddr", "", "to addr")
