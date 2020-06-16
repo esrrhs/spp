@@ -34,6 +34,7 @@ func main() {
 	ping := flag.Bool("ping", false, "show ping")
 	username := flag.String("username", "", "socks5 username")
 	password := flag.String("password", "", "socks5 password")
+	maxclient := flag.Int("maxclient", 8, "max client connection")
 
 	flag.Parse()
 
@@ -111,6 +112,7 @@ func main() {
 	config.ShowPing = *ping
 	config.Username = *username
 	config.Password = *password
+	config.MaxClient = *maxclient
 
 	if *t == "server" {
 		_, err := proxy.NewServer(config, *listenaddr)
