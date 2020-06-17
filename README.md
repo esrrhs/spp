@@ -8,10 +8,12 @@ spp是一个简单强大的网络代理工具。
 * 外部代理协议和内部转发协议可以自由组合
 
 # 使用
+### 服务器
 * 启动server，假设服务器ip是www.server.com，监听端口8888
 ```
 # ./spp -type server -listen :8888
 ```
+### 客户端
 * 启动tcp正向代理，将www.server.com的8080端口映射到本地8080，这样访问本地的8080就相当于访问到了www.server.com的8080
 ```
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
