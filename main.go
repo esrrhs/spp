@@ -71,6 +71,7 @@ func main() {
 	username := flag.String("username", "", "socks5 username")
 	password := flag.String("password", "", "socks5 password")
 	maxclient := flag.Int("maxclient", 8, "max client connection")
+	maxconn := flag.Int("maxconn", 128, "max connection")
 
 	flag.Parse()
 
@@ -161,6 +162,7 @@ func main() {
 	config.Username = *username
 	config.Password = *password
 	config.MaxClient = *maxclient
+	config.MaxSonny = *maxconn
 
 	if *t == "server" {
 		_, err := proxy.NewServer(config, *listenaddr)
