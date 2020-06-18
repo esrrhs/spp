@@ -61,8 +61,8 @@ func main() {
 	var toaddr toFlags
 	flag.Var(&toaddr, "toaddr", "to addr")
 	key := flag.String("key", "", "verify key")
-	encrypt := flag.String("encrypt", "", "encrypt key, empty means off")
-	compress := flag.Int("compress", 0, "start compress size, 0 means off")
+	encrypt := flag.String("encrypt", "default", "encrypt key, empty means off")
+	compress := flag.Int("compress", 128, "start compress size, 0 means off")
 	nolog := flag.Int("nolog", 0, "write log file")
 	noprint := flag.Int("noprint", 0, "print stdout")
 	loglevel := flag.String("loglevel", "info", "log level")
