@@ -134,7 +134,7 @@ func main() {
 
 	if *t == "server" {
 		if len(*listenaddr) == 0 {
-			fmt.Println("[server] need [listenaddr]\n")
+			fmt.Println("[server] need [listen]\n")
 			flag.Usage()
 			return
 		}
