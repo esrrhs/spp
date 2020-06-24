@@ -69,12 +69,12 @@ TCP window size: 1.27 MByte (default)
 ```
 用iperf测试spp的tcp转发，关闭加密与压缩，速度1217 MBytes/sec
 ```
-Client connecting to localhost, TCP port 5002
-TCP window size: 2.53 MByte (default)
+Client connecting to 127.0.0.1, TCP port 5002
+TCP window size: 2.40 MByte (default)
 ------------------------------------------------------------
-[  3] local 127.0.0.1 port 56617 connected with 127.0.0.1 port 5002
+[  3] local 127.0.0.1 port 44933 connected with 127.0.0.1 port 5002
 [ ID] Interval       Transfer     Bandwidth
-[  3]  0.0-10.0 sec  12172 MBytes  1217 MBytes/sec
+[  3]  0.0-10.0 sec  12157 MBytes  1216 MBytes/sec
 ```
 用iperf测试spp的tcp转发，开启加密与压缩，速度208 MBytes/sec，压缩率60%
 ```
