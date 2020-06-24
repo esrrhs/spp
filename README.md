@@ -60,12 +60,12 @@ spp是一个简单强大的网络代理工具。
 # 性能测试
 使用iperf在同机测试，tcp传输，速度3687 MBytes/sec
 ```
-Client connecting to localhost, TCP port 5001
+Client connecting to 127.0.0.1, TCP port 5001
 TCP window size: 1.27 MByte (default)
 ------------------------------------------------------------
-[  3] local 127.0.0.1 port 60145 connected with 127.0.0.1 port 5001
+[  3] local 127.0.0.1 port 48433 connected with 127.0.0.1 port 5001
 [ ID] Interval       Transfer     Bandwidth
-[  3]  0.0-10.0 sec  36865 MBytes  3687 MBytes/sec
+[  3]  0.0-10.0 sec  37806 MBytes  3781 MBytes/sec
 ```
 用iperf测试spp的tcp转发，关闭加密与压缩，速度1217 MBytes/sec
 ```
