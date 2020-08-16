@@ -153,7 +153,7 @@ func main() {
 	}
 	loggo.Ini(loggo.Config{
 		Level:     level,
-		Prefix:    "spp",
+		Prefix:    "spp" + *t,
 		MaxDay:    3,
 		NoLogFile: *nolog > 0,
 		NoPrint:   *noprint > 0,
