@@ -147,13 +147,18 @@ func main() {
 		}
 	}
 
+	logprefix := "server"
+	if *t != "server" {
+		logprefix = "client"
+	}
+
 	level := loggo.LEVEL_INFO
 	if loggo.NameToLevel(*loglevel) >= 0 {
 		level = loggo.NameToLevel(*loglevel)
 	}
 	loggo.Ini(loggo.Config{
 		Level:     level,
-		Prefix:    "spp" + *t,
+		Prefix:    "spp" + logprefix,
 		MaxDay:    3,
 		NoLogFile: *nolog > 0,
 		NoPrint:   *noprint > 0,
