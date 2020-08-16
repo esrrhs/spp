@@ -61,7 +61,7 @@ spp是一个简单强大的网络代理工具。
 使用iperf在同机测试，cpu跑满，带宽数据如下
 |     代理协议         | 直连     | 通过tcp转发 | 通过tcp转发（加密压缩）  | 通过rudp转发 | 通过rudp转发（加密压缩）  |
 |--------------|----------|------------|------------|------------|------------|
-| tcp | 3687 MBytes/sec | 1216 MBytes/sec   | 261 MBytes/sec    |    |    |
+| tcp | 3687 MBytes/sec | 1216 MBytes/sec   | 261 MBytes/sec    |    |  199 MBytes/sec  |
 | udp | 428 MBytes/sec |  132 MBytes/sec  | 4.21 MBytes/sec    |   |    |
 
 性能损耗点主要是打解包、gc、加密压缩算法导致。压缩的压缩率在60%，所以对于限制带宽的场景，可以牺牲cpu换取更高使用带宽。
