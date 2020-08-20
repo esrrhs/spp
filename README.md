@@ -58,11 +58,11 @@ spp是一个简单强大的网络代理工具。
 ```
 
 # 性能测试
-使用benchmark目录的iperf脚本在同机测试，cpu跑满，带宽数据如下
+使用benchmark目录的iperf脚本在单机测试，cpu跑满，带宽数据如下
 |     代理协议         | 直连     | tcp转发 | tcp转发（加密）  |tcp转发（加密压缩）  | rudp转发 | rudp转发（加密）  |rudp转发（加密压缩）  |
 |--------------|----------|------------|------------|------------|------------|------------|------------|
-| TCP | 2019 MBytes/sec | 1186 MBytes/sec   | 201 MBytes/sec | 25.9 MBytes/sec    |  10.5 MBytes/sec  |    |   |
+| TCP | 2019 MBytes/sec | 1186 MBytes/sec   | 201 MBytes/sec | 25.9 MBytes/sec    |  10.5 MBytes/sec  |  10.1 MBytes/sec  |  11.1 MBytes/sec |
 | UDP |  |    |     |   |    |    |   |
 
-性能损耗点主要是打解包、gc、加密压缩算法导致。对于限制带宽的场景，可以牺牲cpu换取更高使用带宽。
+性能损耗点主要是打解包、gc、加密压缩算法导致。对于限制带宽的场景，可以牺牲cpu换取更高使用带宽。rudp因为协议的关系，极限值在10MB。
 
