@@ -79,10 +79,10 @@ spp是一个简单强大的网络代理工具。
 
 |     代理方式   | 速度  |
 |--------------|----------|
-| 直连 | 12.6 MBytes/sec |
-| tcp转发 | 1186 MBytes/sec |
-| tcp转发（加密） | 201 MBytes/sec |
-| tcp转发（加密压缩） | 25.9 MBytes/sec |
+| 直连 | 9.68 MBytes/sec |
+| tcp转发 | 10.0 MBytes/sec |
+| tcp转发（加密） | 9.91 MBytes/sec |
+| tcp转发（加密压缩） | 11.0 MBytes/sec |
 | rudp转发 | 10.5 MBytes/sec |
 | rudp转发（加密） | 10.1 MBytes/sec |
 | rudp转发 | 11.1 MBytes/sec |
