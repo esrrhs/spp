@@ -13,6 +13,11 @@ spp是一个简单强大的网络代理工具。
 ```
 # ./spp -type server -proto tcp -listen :8888
 ```
+* 也可以同时监听其他类型的端口与协议
+```
+# ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999
+```
+
 ### 客户端
 * 启动tcp正向代理，将www.server.com的8080端口映射到本地8080，这样访问本地的8080就相当于访问到了www.server.com的8080
 ```
