@@ -1,4 +1,4 @@
 #! /bin/bash
 
 SER=`cat server`
-iperf -c $SER -p 8844 -f M -F ../smalldata.bin
+iperf3 -c $SER -p 8844 -f M -F ../smalldata.bin
