@@ -46,15 +46,39 @@ func (f *proxyprotoFlags) Set(value string) error {
 	return nil
 }
 
+type protoFlags []string
+
+func (f *protoFlags) String() string {
+	return "tcp"
+}
+
+func (f *protoFlags) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
+type listenAddrs []string
+
+func (f *listenAddrs) String() string {
+	return ""
+}
+
+func (f *listenAddrs) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 func main() {
 
 	defer common.CrashLog()
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
-	proto := flag.String("proto", "tcp", "main proto type: tcp/rudp/ricmp")
+	var protos protoFlags
+	flag.Var(&protos, "proto", "main proto type: tcp/rudp/ricmp")
 	var proxyproto proxyprotoFlags
 	flag.Var(&proxyproto, "proxyproto", "proxy proto type: tcp/udp/rudp/ricmp")
-	listenaddr := flag.String("listen", "", "server listen addr")
+	var listenaddrs listenAddrs
+	flag.Var(&listenaddrs, "listen", "server listen addr")
 	name := flag.String("name", "client", "client name")
 	server := flag.String("server", "", "server addr")
 	var fromaddr fromFlags
@@ -76,19 +100,16 @@ func main() {
 
 	flag.Parse()
 
-	if *proto != "tcp" &&
-		*proto != "rudp" &&
-		*proto != "ricmp" {
-		fmt.Println("[proto] must be tcp/rudp/ricmp\n")
-		flag.Usage()
-		return
+	for _, p := range protos {
+		if p != "tcp" && p != "rudp" && p != "ricmp" {
+			fmt.Println("[proto] must be tcp/rudp/ricmp\n")
+			flag.Usage()
+			return
+		}
 	}
 
 	for _, p := range proxyproto {
-		if p != "tcp" &&
-			p != "udp" &&
-			p != "rudp" &&
-			p != "ricmp" {
+		if p != "tcp" && p != "udp" && p != "rudp" && p != "ricmp" {
 			fmt.Println("[proxyproto] tcp/udp/rudp/ricmp\n")
 			flag.Usage()
 			return
@@ -120,6 +141,10 @@ func main() {
 			flag.Usage()
 			return
 		}
+
+		if len(protos) == 0 {
+			protos = append(protos, "tcp")
+		}
 	}
 
 	if *t == "socks5_client" ||
@@ -137,11 +162,15 @@ func main() {
 			flag.Usage()
 			return
 		}
+
+		if len(protos) == 0 {
+			protos = append(protos, "tcp")
+		}
 	}
 
 	if *t == "server" {
-		if len(*listenaddr) == 0 {
-			fmt.Println("[server] need [listen]\n")
+		if len(listenaddrs) != len(protos) {
+			fmt.Println("[proto] [listen] len must be equal\n")
 			flag.Usage()
 			return
 		}
@@ -169,7 +198,6 @@ func main() {
 	config.Compress = *compress
 	config.Key = *key
 	config.Encrypt = *encrypt
-	config.Proto = *proto
 	config.ShowPing = *ping
 	config.Username = *username
 	config.Password = *password
@@ -177,7 +205,7 @@ func main() {
 	config.MaxSonny = *maxconn
 
 	if *t == "server" {
-		_, err := proxy.NewServer(config, *listenaddr)
+		_, err := proxy.NewServer(config, protos, listenaddrs)
 		if err != nil {
 			loggo.Error("main NewServer fail %s", err.Error())
 			return
@@ -186,7 +214,7 @@ func main() {
 	} else {
 		clienttypestr := strings.Replace(*t, "_client", "", -1)
 		clienttypestr = strings.ToUpper(clienttypestr)
-		_, err := proxy.NewClient(config, *server, *name, clienttypestr, proxyproto, fromaddr, toaddr)
+		_, err := proxy.NewClient(config, protos[0], *server, *name, clienttypestr, proxyproto, fromaddr, toaddr)
 		if err != nil {
 			loggo.Error("main NewClient fail %s", err.Error())
 			return
