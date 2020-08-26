@@ -1,4 +1,3 @@
 #! /bin/bash
 
-SER=`cat server`
-iperf3 -c $SER -p 8855 -f M  -F ../smalldata.bin
+../iperf -c 127.0.0.1 -p 8855 -f M  -F ../smalldata.bin
