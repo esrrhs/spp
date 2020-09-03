@@ -83,9 +83,9 @@ spp是一个简单强大的网络代理工具。
 | tcp转发 | 3.81 MBytes/sec |
 | tcp转发（加密） | 3.90 MBytes/sec |
 | tcp转发（加密压缩） | 4.02 MBytes/sec |
-| rudp转发 | 3.21 MBytes/sec |
-| rudp转发（加密） | 3.08 MBytes/sec |
-| rudp转发 | 3.21 MBytes/sec |
+| rudp转发 | 3.33 MBytes/sec |
+| rudp转发（加密） | 3.41 MBytes/sec |
+| rudp转发 | 3.58 MBytes/sec |
 
 * 注意：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 
