@@ -67,13 +67,13 @@ spp是一个简单强大的网络代理工具。
 
 |     代理方式   | 速度  |
 |--------------|----------|
-| 直连 | 2019 MBytes/sec |
-| tcp转发 | 1186 MBytes/sec |
-| tcp转发（加密） | 201 MBytes/sec |
-| tcp转发（加密压缩） | 25.9 MBytes/sec |
-| rudp转发 | 10.5 MBytes/sec |
-| rudp转发（加密） | 10.1 MBytes/sec |
-| rudp转发 | 11.1 MBytes/sec |
+| 直连 | 2648 MBytes/sec |
+| tcp转发 | 663 MBytes/sec |
+| tcp转发（加密） | 225 MBytes/sec |
+| tcp转发（加密压缩） | 23.4 MBytes/sec |
+| rudp转发 | 5.15 MBytes/sec |
+| rudp转发（加密） | 5.81 MBytes/sec |
+| rudp转发 | 5.05 MBytes/sec |
 
 * 使用benchmark/remote_tcp目录的iperf脚本，在多机测试，服务器位于腾讯云，客户端位于本地，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
 
