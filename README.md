@@ -67,7 +67,7 @@ spp是一个简单强大的网络代理工具。
 
 |     代理方式   | 速度  |
 |--------------|----------|
-| 直连 | 2648 MBytes/sec |
+| 直连 | 3535 MBytes/sec |
 | tcp转发 | 663 MBytes/sec |
 | tcp转发（加密） | 225 MBytes/sec |
 | tcp转发（加密压缩） | 23.4 MBytes/sec |
