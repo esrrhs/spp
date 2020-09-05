@@ -46,7 +46,7 @@ spp是一个简单强大的网络代理工具。
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8081 -toaddr :8081 -proxyproto rudp
 
 代理可靠icmp
-# ./spp -name "test" -type proxy_client -server www.server.com -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
+# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
 
 同时代理上述三种
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -fromaddr :8081 -toaddr :8081 -proxyproto rudp -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
@@ -58,7 +58,7 @@ spp是一个简单强大的网络代理工具。
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto rudp
 
 代理tcp，内部用可靠icmp协议转发
-# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto ricmp
+# ./spp -name "test" -type proxy_client -server www.server.com -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto ricmp
 
 代理udp，内部用tcp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto tcp
