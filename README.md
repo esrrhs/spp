@@ -15,7 +15,7 @@ spp是一个简单强大的网络代理工具。
 ```
 * 也可以同时监听其他类型的端口与协议
 ```
-# ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999
+# ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999 -proto ricmp -listen 0.0.0.0
 ```
 
 ### 客户端
@@ -44,7 +44,7 @@ spp是一个简单强大的网络代理工具。
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8081 -toaddr :8081 -proxyproto rudp
 
 代理可靠icmp
-# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
+# ./spp -name "test" -type proxy_client -server www.server.com -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
 
 同时代理上述三种
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -fromaddr :8081 -toaddr :8081 -proxyproto rudp -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
