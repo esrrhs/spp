@@ -1,6 +1,8 @@
 # spp
 spp是一个简单强大的网络代理工具。
 
+![image](show.png)
+
 # 功能
 * 支持的协议：tcp、udp、可靠udp、可靠icmp
 * 支持的类型：正向代理、反向代理、socks5正向代理、socks5反向代理
