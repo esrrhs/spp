@@ -96,7 +96,7 @@ spp是一个简单强大的网络代理工具。
 | ricmp转发 | 3.17 MBytes/sec |
 
 * 注意：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
-* 多协议网络测试工具，查看[connperf](https://github.com/esrrhs/connperf)
+* 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
 
 
 
