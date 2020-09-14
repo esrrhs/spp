@@ -74,9 +74,9 @@ func main() {
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
 	var protos protoFlags
-	flag.Var(&protos, "proto", "main proto type: tcp/rudp/ricmp")
+	flag.Var(&protos, "proto", "main proto type: tcp/rudp/ricmp/kcp")
 	var proxyproto proxyprotoFlags
-	flag.Var(&proxyproto, "proxyproto", "proxy proto type: tcp/udp/rudp/ricmp")
+	flag.Var(&proxyproto, "proxyproto", "proxy proto type: tcp/udp/rudp/ricmp/kcp")
 	var listenaddrs listenAddrs
 	flag.Var(&listenaddrs, "listen", "server listen addr")
 	name := flag.String("name", "client", "client name")
