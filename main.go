@@ -101,16 +101,16 @@ func main() {
 	flag.Parse()
 
 	for _, p := range protos {
-		if p != "tcp" && p != "rudp" && p != "ricmp" {
-			fmt.Println("[proto] must be tcp/rudp/ricmp\n")
+		if p != "tcp" && p != "rudp" && p != "ricmp" && p != "kcp" {
+			fmt.Println("[proto] must be tcp/rudp/ricmp/kcp\n")
 			flag.Usage()
 			return
 		}
 	}
 
 	for _, p := range proxyproto {
-		if p != "tcp" && p != "udp" && p != "rudp" && p != "ricmp" {
-			fmt.Println("[proxyproto] tcp/udp/rudp/ricmp\n")
+		if p != "tcp" && p != "udp" && p != "rudp" && p != "ricmp" && p != "kcp" {
+			fmt.Println("[proxyproto] tcp/udp/rudp/ricmp/kcp\n")
 			flag.Usage()
 			return
 		}
