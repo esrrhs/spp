@@ -157,7 +157,7 @@ func main() {
 			}
 		}
 
-		if !(len(fromaddr) == len(toaddr) && len(fromaddr) == len(proxyproto)) {
+		if !(len(fromaddr) == len(proxyproto)) {
 			fmt.Println("[fromaddr] [proxyproto] len must be equal\n")
 			flag.Usage()
 			return
