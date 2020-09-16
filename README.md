@@ -19,7 +19,10 @@ spp是一个简单强大的网络代理工具。
 ```
 # ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999 -proto ricmp -listen 0.0.0.0
 ```
-
+* 也可以使用docker
+```
+# docker run --name my-server -d --restart=always --network host esrrhs/spp ./spp -proto tcp -listen :8888
+```
 ### 客户端
 * 启动tcp正向代理，将www.server.com的8080端口映射到本地8080，这样访问本地的8080就相当于访问到了www.server.com的8080
 ```
@@ -62,6 +65,10 @@ spp是一个简单强大的网络代理工具。
 
 代理udp，内部用tcp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto tcp
+```
+* 也可以使用docker
+```
+# docker run --name my-client -d --restart=always --network host esrrhs/spp ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
 ```
 
 # 性能测试
