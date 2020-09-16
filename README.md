@@ -79,6 +79,10 @@ spp是一个简单强大的网络代理工具。
 | ricmp转发 | 3.34 MBytes/sec |
 | ricmp转发（加密） | 3.25 MBytes/sec |
 | ricmp转发 | 3.46 MBytes/sec |
+| kcp转发 | 18.2 MBytes/sec |
+| tcp转发（加密） | 18.6 MBytes/sec |
+| tcp转发（加密压缩） | 14.7 MBytes/sec |
+
 
 * 使用benchmark/remote_tcp目录的iperf脚本，在多机测试，服务器位于腾讯云，客户端位于本地，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
 
