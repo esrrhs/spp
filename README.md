@@ -69,7 +69,7 @@ spp是一个简单强大的网络代理工具。
 代理udp，内部用kcp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto kcp
 
-代理tdp，内部用quic协议转发
+代理tcp，内部用quic协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto quic
 ```
 * 也可以使用docker
