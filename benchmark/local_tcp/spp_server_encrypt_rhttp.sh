@@ -1,3 +1,3 @@
 #! /bin/bash
 
-../../spp -type server -listen :8888 -proto kcp -compress 0 
+../../spp -type server -listen :8888 -proto rhttp -compress 0
