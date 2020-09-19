@@ -19,7 +19,10 @@ spp是一个简单强大的网络代理工具。
 ```
 # ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999 -proto ricmp -listen 0.0.0.0
 ```
-
+* 也可以使用docker
+```
+# docker run --name my-server -d --restart=always --network host esrrhs/spp ./spp -proto tcp -listen :8888
+```
 ### 客户端
 * 启动tcp正向代理，将www.server.com的8080端口映射到本地8080，这样访问本地的8080就相当于访问到了www.server.com的8080
 ```
@@ -63,6 +66,10 @@ spp是一个简单强大的网络代理工具。
 代理udp，内部用tcp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto tcp
 ```
+* 也可以使用docker
+```
+# docker run --name my-client -d --restart=always --network host esrrhs/spp ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
+```
 
 # 性能测试
 * 使用benchmark/local_tcp目录的iperf脚本，在单机测试，在cpu跑满的情况下，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
@@ -79,6 +86,10 @@ spp是一个简单强大的网络代理工具。
 | ricmp转发 | 3.34 MBytes/sec |
 | ricmp转发（加密） | 3.25 MBytes/sec |
 | ricmp转发 | 3.46 MBytes/sec |
+| kcp转发 | 18.2 MBytes/sec |
+| kcp转发（加密） | 18.6 MBytes/sec |
+| kcp转发（加密压缩） | 14.7 MBytes/sec |
+
 
 * 使用benchmark/remote_tcp目录的iperf脚本，在多机测试，服务器位于腾讯云，客户端位于本地，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
 
@@ -94,8 +105,11 @@ spp是一个简单强大的网络代理工具。
 | ricmp转发 | 3.21 MBytes/sec |
 | ricmp转发（加密） | 2.95 MBytes/sec |
 | ricmp转发 | 3.17 MBytes/sec |
+| kcp转发 | 3.58 MBytes/sec |
+| kcp转发（加密） | 3.58 MBytes/sec |
+| kcp转发（加密压缩）| 3.75 MBytes/sec |
 
-* 注意：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
+* 注：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 * 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
 
 
