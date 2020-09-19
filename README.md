@@ -117,9 +117,9 @@ spp是一个简单强大的网络代理工具。
 | kcp转发 | 3.58 MBytes/sec |
 | kcp转发（加密） | 3.58 MBytes/sec |
 | kcp转发（加密压缩）| 3.75 MBytes/sec |
-| quic转发 |   MBytes/sec |
-| quic转发（加密） |   MBytes/sec |
-| quic转发（加密压缩） |   MBytes/sec |
+| quic转发 | 3.85 MBytes/sec |
+| quic转发（加密） | 3.83 MBytes/sec |
+| quic转发（加密压缩） | 3.92 MBytes/sec |
 
 * 注：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 * 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
