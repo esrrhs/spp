@@ -4,7 +4,7 @@ spp是一个简单强大的网络代理工具。
 ![image](show.png)
 
 # 功能
-* 支持的协议：tcp、udp、rudp、ricmp、kcp、quic
+* 支持的协议：tcp、udp、rudp(可靠udp)、ricmp(可靠icmp)、rhttp(可靠http)、kcp、quic
 * 支持的类型：正向代理、反向代理、socks5正向代理、socks5反向代理
 * 协议和类型可以自由组合
 * 外部代理协议和内部转发协议可以自由组合
@@ -45,10 +45,10 @@ spp是一个简单强大的网络代理工具。
 代理udp
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp
 
-代理可靠udp
+代理rudp
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8081 -toaddr :8081 -proxyproto rudp
 
-代理可靠icmp
+代理ricmp
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
 
 同时代理上述三种
@@ -57,10 +57,10 @@ spp是一个简单强大的网络代理工具。
 ```
 * client和server之间的内部通信，也可以修改为其他协议，外部协议与内部协议之间自动转换。例如
 ```
-代理tcp，内部用可靠udp协议转发
+代理tcp，内部用rudp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto rudp
 
-代理tcp，内部用可靠icmp协议转发
+代理tcp，内部用ricmp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto ricmp
 
 代理udp，内部用tcp协议转发
@@ -71,6 +71,9 @@ spp是一个简单强大的网络代理工具。
 
 代理tcp，内部用quic协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto quic
+
+代理tcp，内部用rhttp协议转发
+# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto rhttp
 ```
 * 也可以使用docker
 ```
