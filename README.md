@@ -1,4 +1,13 @@
 # spp
+
+[<img src="https://img.shields.io/github/license/esrrhs/spp">](https://github.com/esrrhs/spp)
+[<img src="https://img.shields.io/github/languages/top/esrrhs/spp">](https://github.com/esrrhs/spp)
+[![Go Report Card](https://goreportcard.com/badge/github.com/esrrhs/spp)](https://goreportcard.com/report/github.com/esrrhs/spp)
+[<img src="https://img.shields.io/github/v/release/esrrhs/spp">](https://github.com/esrrhs/spp/releases)
+[<img src="https://img.shields.io/github/downloads/esrrhs/spp/total">](https://github.com/esrrhs/spp/releases)
+[<img src="https://img.shields.io/docker/pulls/esrrhs/spp">](https://hub.docker.com/repository/docker/esrrhs/spp)
+[<img src="https://img.shields.io/github/workflow/status/esrrhs/spp/Go">](https://github.com/esrrhs/spp/actions)
+
 spp是一个简单强大的网络代理工具。
 
 ![image](show.png)
