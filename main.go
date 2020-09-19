@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/esrrhs/go-engine/src/common"
+	"github.com/esrrhs/go-engine/src/conn"
 	"github.com/esrrhs/go-engine/src/loggo"
 	"github.com/esrrhs/go-engine/src/proxy"
 	"net/http"
@@ -74,9 +75,9 @@ func main() {
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
 	var protos protoFlags
-	flag.Var(&protos, "proto", "main proto type: tcp/rudp/ricmp/kcp")
+	flag.Var(&protos, "proto", "main proto type: "+fmt.Sprintf("%v", conn.SupportReliableProtos()))
 	var proxyproto proxyprotoFlags
-	flag.Var(&proxyproto, "proxyproto", "proxy proto type: tcp/udp/rudp/ricmp/kcp")
+	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", conn.SupportProtos()))
 	var listenaddrs listenAddrs
 	flag.Var(&listenaddrs, "listen", "server listen addr")
 	name := flag.String("name", "client", "client name")
@@ -101,16 +102,16 @@ func main() {
 	flag.Parse()
 
 	for _, p := range protos {
-		if p != "tcp" && p != "rudp" && p != "ricmp" && p != "kcp" {
-			fmt.Println("[proto] must be tcp/rudp/ricmp/kcp\n")
+		if !conn.HasReliableProto(p) {
+			fmt.Println("[proto] must be " + fmt.Sprintf("%v", conn.SupportReliableProtos()) + "\n")
 			flag.Usage()
 			return
 		}
 	}
 
 	for _, p := range proxyproto {
-		if p != "tcp" && p != "udp" && p != "rudp" && p != "ricmp" && p != "kcp" {
-			fmt.Println("[proxyproto] tcp/udp/rudp/ricmp/kcp\n")
+		if !conn.HasProto(p) {
+			fmt.Println("[proxyproto] " + fmt.Sprintf("%v", conn.SupportProtos()) + "\n")
 			flag.Usage()
 			return
 		}
