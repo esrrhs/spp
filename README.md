@@ -83,51 +83,28 @@ spp是一个简单强大的网络代理工具。
 # 性能测试
 * 使用benchmark/local_tcp目录的iperf脚本，在单机测试，在cpu跑满的情况下，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
 
-|     代理方式   | 速度  |
-|--------------|----------|
-| 直连 | 3535 MBytes/sec |
-| tcp转发 | 663 MBytes/sec |
-| tcp转发（加密） | 225 MBytes/sec |
-| tcp转发（加密压缩） | 23.4 MBytes/sec |
-| rudp转发 | 5.15 MBytes/sec |
-| rudp转发（加密） | 5.81 MBytes/sec |
-| rudp转发（加密压缩） | 5.05 MBytes/sec |
-| ricmp转发 | 3.34 MBytes/sec |
-| ricmp转发（加密） | 3.25 MBytes/sec |
-| ricmp转发（加密压缩） | 3.46 MBytes/sec |
-| rhttp转发 | 10.7 MBytes/sec |
-| rhttp转发（加密） | 10.8 MBytes/sec |
-| rhttp转发（加密压缩） | 8.73 MBytes/sec |
-| kcp转发 | 18.2 MBytes/sec |
-| kcp转发（加密） | 18.6 MBytes/sec |
-| kcp转发（加密压缩） | 14.7 MBytes/sec |
-| quic转发 | 35.5 MBytes/sec |
-| quic转发（加密） | 32.8 MBytes/sec |
-| quic转发（加密压缩） | 15.1 MBytes/sec |
+|     代理方式   | 速度  | 速度（加密）  | 速度（加密压缩）  |
+|--------------|----------|----------|----------|
+| 直连 | 3535 MBytes/sec | | |
+| tcp转发 | 663 MBytes/sec | 225 MBytes/sec | 23.4 MBytes/sec |
+| rudp转发 | 5.15 MBytes/sec | 5.81 MBytes/sec | 5.05 MBytes/sec|
+| ricmp转发 | 3.34 MBytes/sec | 3.25 MBytes/sec|3.46 MBytes/sec |
+| rhttp转发 | 10.7 MBytes/sec | 10.8 MBytes/sec| 8.73 MBytes/sec|
+| kcp转发 | 18.2 MBytes/sec | 18.6 MBytes/sec| 14.7 MBytes/sec|
+| quic转发 | 35.5 MBytes/sec | 32.8 MBytes/sec|15.1 MBytes/sec |
 
 * 使用benchmark/remote_tcp目录的iperf脚本，在多机测试，服务器位于腾讯云，客户端位于本地，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
 
-|     代理方式   | 速度  |
-|--------------|----------|
-| 直连 | 2.74 MBytes/sec |
-| tcp转发 | 3.81 MBytes/sec |
-| tcp转发（加密） | 3.90 MBytes/sec |
-| tcp转发（加密压缩） | 4.02 MBytes/sec |
-| rudp转发 | 3.33 MBytes/sec |
-| rudp转发（加密） | 3.41 MBytes/sec |
-| rudp转发（加密压缩） | 3.58 MBytes/sec |
-| ricmp转发 | 3.21 MBytes/sec |
-| ricmp转发（加密） | 2.95 MBytes/sec |
-| ricmp转发（加密压缩） | 3.17 MBytes/sec |
-| rhttp转发 | 3.48 MBytes/sec |
-| rhttp转发（加密） | 3.49 MBytes/sec |
-| rhttp转发（加密压缩） | 3.39 MBytes/sec |
-| kcp转发 | 3.58 MBytes/sec |
-| kcp转发（加密） | 3.58 MBytes/sec |
-| kcp转发（加密压缩）| 3.75 MBytes/sec |
-| quic转发 | 3.85 MBytes/sec |
-| quic转发（加密） | 3.83 MBytes/sec |
-| quic转发（加密压缩） | 3.92 MBytes/sec |
+|     代理方式   | 速度  |速度（加密）  | 速度（加密压缩）  |
+|--------------|----------|----------|----------|
+| 直连 | 2.74 MBytes/sec | | |
+| tcp转发 | 3.81 MBytes/sec |3.90 MBytes/sec | 4.02 MBytes/sec|
+| rudp转发 | 3.33 MBytes/sec | 3.41 MBytes/sec| 3.58 MBytes/sec|
+| ricmp转发 | 3.21 MBytes/sec | 2.95 MBytes/sec| 3.17 MBytes/sec|
+| rhttp转发 | 3.48 MBytes/sec |3.49 MBytes/sec |3.39 MBytes/sec |
+| kcp转发 | 3.58 MBytes/sec |3.58 MBytes/sec | 3.75 MBytes/sec |
+| quic转发 | 3.85 MBytes/sec | 3.83 MBytes/sec | 3.92 MBytes/sec |
+
 
 * 注：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 * 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
