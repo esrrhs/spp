@@ -4,7 +4,7 @@ spp是一个简单强大的网络代理工具。
 ![image](show.png)
 
 # 功能
-* 支持的协议：tcp、udp、可靠udp(rudp)、可靠icmp(ricmp)、kcp
+* 支持的协议：tcp、udp、可靠udp(rudp)、可靠icmp(ricmp)、kcp、quic
 * 支持的类型：正向代理、反向代理、socks5正向代理、socks5反向代理
 * 协议和类型可以自由组合
 * 外部代理协议和内部转发协议可以自由组合
@@ -65,6 +65,12 @@ spp是一个简单强大的网络代理工具。
 
 代理udp，内部用tcp协议转发
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto tcp
+
+代理udp，内部用kcp协议转发
+# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto kcp
+
+代理udp，内部用quic协议转发
+# ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto quic
 ```
 * 也可以使用docker
 ```
@@ -89,6 +95,9 @@ spp是一个简单强大的网络代理工具。
 | kcp转发 | 18.2 MBytes/sec |
 | kcp转发（加密） | 18.6 MBytes/sec |
 | kcp转发（加密压缩） | 14.7 MBytes/sec |
+| quic转发 | 35.5 MBytes/sec |
+| quic转发（加密） | 32.8 MBytes/sec |
+| quic转发（加密压缩） | 15.1 MBytes/sec |
 
 
 * 使用benchmark/remote_tcp目录的iperf脚本，在多机测试，服务器位于腾讯云，客户端位于本地，测试最大带宽速度。代理协议是tcp，采用各种中转协议转发的结果如下：
@@ -108,6 +117,9 @@ spp是一个简单强大的网络代理工具。
 | kcp转发 | 3.58 MBytes/sec |
 | kcp转发（加密） | 3.58 MBytes/sec |
 | kcp转发（加密压缩）| 3.75 MBytes/sec |
+| quic转发 |   MBytes/sec |
+| quic转发（加密） |   MBytes/sec |
+| quic转发（加密压缩） |   MBytes/sec |
 
 * 注：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 * 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
