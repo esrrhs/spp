@@ -17,7 +17,7 @@ spp是一个简单强大的网络代理工具。
 * 支持的类型：正向代理、反向代理、socks5正向代理、socks5反向代理
 * 协议和类型可以自由组合
 * 外部代理协议和内部转发协议可以自由组合
-* 适配shadowsocks的插件，[spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin)
+* 网络层[go-engine conn](https://github.com/esrrhs/go-engine/tree/master/src/conn)封装成shadowsocks的插件，[spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin)，[spp-shadowsocks-plugin-android](https://github.com/esrrhs/spp-shadowsocks-plugin-android)
 
 # 使用
 ### 服务器
