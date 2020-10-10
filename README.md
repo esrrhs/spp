@@ -118,3 +118,4 @@ spp是一个简单强大的网络代理工具。
 
 * 注：测试数据是centos.iso，已经被压缩过了，所以压缩转发的效果不明显
 * 如果想直接测试下网络的各协议带宽，使用多协议带宽测试工具[connperf](https://github.com/esrrhs/connperf)
+
