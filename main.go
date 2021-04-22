@@ -122,7 +122,8 @@ func main() {
 		*t != "socks5_client" &&
 		*t != "reverse_socks5_client" &&
 		*t != "server" {
-		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client\n")
+		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
+		fmt.Println()
 		flag.Usage()
 		return
 	}
@@ -131,14 +132,16 @@ func main() {
 		*t == "reverse_proxy_client" {
 		for i, _ := range proxyproto {
 			if len(fromaddr[i]) == 0 || len(*server) == 0 || len(toaddr[i]) == 0 {
-				fmt.Println("[proxy_client] or [reverse_proxy_client] need [server] [fromaddr] [toaddr] [proxyproto]\n")
+				fmt.Println("[proxy_client] or [reverse_proxy_client] need [server] [fromaddr] [toaddr] [proxyproto]")
+				fmt.Println()
 				flag.Usage()
 				return
 			}
 		}
 
 		if !(len(fromaddr) == len(toaddr) && len(fromaddr) == len(proxyproto)) {
-			fmt.Println("[fromaddr] [toaddr] [proxyproto] len must be equal\n")
+			fmt.Println("[fromaddr] [toaddr] [proxyproto] len must be equal")
+			fmt.Println()
 			flag.Usage()
 			return
 		}
@@ -152,14 +155,16 @@ func main() {
 		*t == "reverse_socks5_client" {
 		for i, _ := range proxyproto {
 			if len(fromaddr[i]) == 0 || len(*server) == 0 {
-				fmt.Println("[socks5_client] or [reverse_socks5_client] need [server] [fromaddr] [proxyproto]\n")
+				fmt.Println("[socks5_client] or [reverse_socks5_client] need [server] [fromaddr] [proxyproto]")
+				fmt.Println()
 				flag.Usage()
 				return
 			}
 		}
 
 		if !(len(fromaddr) == len(proxyproto)) {
-			fmt.Println("[fromaddr] [proxyproto] len must be equal\n")
+			fmt.Println("[fromaddr] [proxyproto] len must be equal")
+			fmt.Println()
 			flag.Usage()
 			return
 		}
@@ -171,7 +176,8 @@ func main() {
 
 	if *t == "server" {
 		if len(listenaddrs) != len(protos) {
-			fmt.Println("[proto] [listen] len must be equal\n")
+			fmt.Println("[proto] [listen] len must be equal")
+			fmt.Println()
 			flag.Usage()
 			return
 		}
