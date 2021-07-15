@@ -10,6 +10,8 @@
 
 spp是一个简单强大的网络代理工具。
 
+[Readme EN](./README_EN.md)
+
 ![image](show.png)
 
 # 功能
