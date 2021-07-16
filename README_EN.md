@@ -10,8 +10,6 @@
 
 SPP is a simple and powerful proxy
 
-[Readme EN](./README_EN.md)
-
 ![image](show.png)
 
 # Features
