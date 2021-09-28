@@ -12,6 +12,14 @@ rm pack.zip -f
 mkdir pack
 
 go get -u -v github.com/esrrhs/spp/...
+last=`pwd`
+cd $GOPATH/src/golang.org/x
+for dir in `ls`; do
+  cd $dir
+  git pull
+  cd ..
+done
+cd $last
 
 for line in $build_list; do
   os=$(echo "$line" | awk -F"/" '{print $1}')
