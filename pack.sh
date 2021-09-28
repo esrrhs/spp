@@ -26,6 +26,10 @@ for line in $build_list; do
   if [ $arch == "riscv64" ]; then
     continue
   fi
+  if [ $os == "ios" && $arch == "mips64" ]; then
+    continue
+  fi
+
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="-s -w"
   if [ $? -ne 0 ]; then
     echo "os="$os" arch="$arch" build fail"
