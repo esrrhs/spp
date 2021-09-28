@@ -26,7 +26,7 @@ for line in $build_list; do
   if [ $arch == "riscv64" ]; then
     continue
   fi
-  if [[ ($os == "ios") && ($arch == "mips64") ]]; then
+  if [[ ($os == "openbsd") && ($arch == "mips64") ]]; then
     continue
   fi
 
