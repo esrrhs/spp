@@ -50,7 +50,7 @@ spp是一个简单强大的网络代理工具。
 ```
 * 启动tcp反向socks5代理，在www.server.com的8080端口开启socks5协议，通过client访问client所在的网络
 ```
-# ./spp -name "test" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
+# ./spp -name "test" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
 ```
 * 其他代理协议，只需要修改client的proxyproto参数即可，例如
 
