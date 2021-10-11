@@ -48,7 +48,7 @@ SPP is a simple and powerful proxy
 ```
 * Start TCP Reverse Socks5 Agent, open the Socks5 protocol at www.server.com's 8080 port, access the network in the client through the Client
 ```
-# ./spp -name "test" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
+# ./spp -name "test" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
 ```
 * Other proxy protocols, only need to modify the proxyProto parameters of the client, for example
 
