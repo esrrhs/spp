@@ -10,6 +10,8 @@
 
 SPP is a simple and powerful proxy
 
+## Note: This tool is only to be used for study and research, do not use it for illegal purposes
+
 ![image](show.png)
 
 # Features
