@@ -1,0 +1,91 @@
+syntax = "proto3";
+option go_package = "proxy";
+
+enum PROXY_PROTO {
+    TCP = 0;
+    UDP = 1;
+    RUDP = 2;
+    RICMP = 3;
+    KCP = 4;
+}
+
+enum CLIENT_TYPE {
+    // client fromaddr -> server toaddr
+    PROXY = 0;
+    // server fromaddr -> client toaddr
+    REVERSE_PROXY = 1;
+    // client fromaddr -> server
+    SOCKS5 = 2;
+    // server fromaddr -> client
+    REVERSE_SOCKS5 = 3;
+    // client fromaddr -> server shadowsocks address [SS_LOCAL_HOST:SS_LOCAL_PORT]
+    SS_PROXY = 4;
+}
+
+message LoginFrame {
+    PROXY_PROTO proxyproto = 1;
+    CLIENT_TYPE clienttype = 2;
+    string fromaddr = 3;
+    string toaddr = 4;
+    string name = 5;
+    string key = 6;
+}
+
+message LoginRspFrame {
+    bool ret = 1;
+    string msg = 2;
+}
+
+message PingFrame {
+    int64 time = 1;
+}
+
+message PongFrame {
+    int64 time = 1;
+}
+
+message OpenConnFrame {
+    string id = 1;
+    string toaddr = 2;
+}
+
+message OpenConnRspFrame {
+    string id = 1;
+    bool ret = 2;
+    string msg = 3;
+}
+
+message CloseFrame {
+    string id = 1;
+}
+
+message DataFrame {
+    string id = 1;
+    bool compress = 2;
+    string crc = 3;
+    bytes data = 4;
+    int32 index = 5;
+}
+
+enum FRAME_TYPE {
+    LOGIN = 0;
+    LOGINRSP = 1;
+    DATA = 2;
+    PING = 3;
+    PONG = 4;
+    OPEN = 5;
+    OPENRSP = 6;
+    CLOSE = 7;
+}
+
+message ProxyFrame {
+    FRAME_TYPE type = 1;
+    LoginFrame loginFrame = 2;
+    LoginRspFrame loginRspFrame = 3;
+    DataFrame dataFrame = 4;
+    PingFrame pingFrame = 5;
+    PongFrame pongFrame = 6;
+    OpenConnFrame openFrame = 7;
+    OpenConnRspFrame openRspFrame = 8;
+    CloseFrame closeFrame = 9;
+}
