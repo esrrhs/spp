@@ -26,6 +26,9 @@ for line in $build_list; do
   if [ $arch == "riscv64" ]; then
     continue
   fi
+  if [ $arch == "mips64" ] && [ $os == "openbsd" ]; then
+    continue
+  fi
 
   CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -ldflags="-s -w"
   if [ $? -ne 0 ]; then
@@ -55,4 +58,3 @@ done
 zip pack.zip pack/ -r
 
 echo "all done"
-
