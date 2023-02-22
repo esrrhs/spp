@@ -1,8 +1,11 @@
 FROM golang AS build-env
 
-RUN go mod tidy
-RUN go install github.com/esrrhs/spp
+WORKDIR /app
+
+COPY go.* ./
+RUN go mod download
+RUN go build -v -o spp
 
 FROM debian
-COPY --from=build-env /go/bin/spp .
+COPY --from=build-env /app/spp .
 WORKDIR ./
