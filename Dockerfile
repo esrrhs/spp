@@ -1,6 +1,5 @@
 FROM golang AS build-env
 
-RUN go get -u github.com/esrrhs/spp
 RUN go mod tidy
 RUN go install github.com/esrrhs/spp
 
