@@ -6,7 +6,7 @@ import (
 	"github.com/esrrhs/gohome/conn"
 	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
-	"github.com/esrrhs/spp/network"
+	"github.com/esrrhs/gohome/network"
 	"sync"
 	"sync/atomic"
 )
