@@ -11,7 +11,6 @@ require (
 
 require (
 	github.com/OneOfOne/xxhash v1.2.8 // indirect
-	github.com/go-task/slim-sprig v0.0.0-20230315185526-52ccab3ef572 // indirect
 	github.com/go-task/slim-sprig/v3 v3.0.0 // indirect
 	github.com/google/pprof v0.0.0-20241101162523-b92577c0c142 // indirect
 	github.com/google/uuid v1.6.0 // indirect
