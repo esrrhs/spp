@@ -2,9 +2,9 @@ package proxy
 
 import (
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
-	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -15,16 +15,16 @@ type Outputer struct {
 	config     *Config
 	proto      string
 	father     *ProxyConn
-	fwg        *group.Group
+	fwg        *thread.Group
 
-	conn  conn.Conn
+	conn  network.Conn
 	sonny sync.Map
 
 	ss bool
 }
 
-func NewOutputer(wg *group.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
-	conn, err := conn.NewConn(proto)
+func NewOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
+	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
@@ -43,8 +43,8 @@ func NewOutputer(wg *group.Group, proto string, clienttype CLIENT_TYPE, config *
 	return output, nil
 }
 
-func NewSSOutputer(wg *group.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
-	conn, err := conn.NewConn(proto)
+func NewSSOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
+	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
@@ -107,7 +107,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 	rf.OpenRspFrame = &OpenConnRspFrame{}
 	rf.OpenRspFrame.Id = id
 
-	c, err := conn.NewConn(o.conn.Name())
+	c, err := network.NewConn(o.conn.Name())
 	if err != nil {
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "NewConn fail " + targetAddr
@@ -116,13 +116,13 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 		return false
 	}
 
-	wg := group.NewGroup("Outputer open"+" "+targetAddr, o.fwg, func() {
+	wg := thread.NewGroup("Outputer open"+" "+targetAddr, o.fwg, func() {
 		loggo.Info("group start exit %s", c.Info())
 		c.Close()
 		loggo.Info("group end exit %s", c.Info())
 	})
 
-	var conn conn.Conn
+	var conn network.Conn
 	wg.Go("Outputer Dial"+" "+targetAddr, func() error {
 		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
 		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
@@ -222,7 +222,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 
 	loggo.Info("Outputer processProxyConn open ok %s %s", proxyConn.id, proxyConn.conn.Info())
 
-	wg := group.NewGroup("Outputer processProxyConn"+" "+proxyConn.conn.Info(), o.fwg, func() {
+	wg := thread.NewGroup("Outputer processProxyConn"+" "+proxyConn.conn.Info(), o.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
 		proxyConn.conn.Close()
 		sendch.Close()

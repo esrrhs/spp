@@ -4,8 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/spp/proxy"
 	"net/http"
 	_ "net/http/pprof"
@@ -75,9 +75,9 @@ func main() {
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
 	var protos protoFlags
-	flag.Var(&protos, "proto", "main proto type: "+fmt.Sprintf("%v", conn.SupportReliableProtos()))
+	flag.Var(&protos, "proto", "main proto type: "+fmt.Sprintf("%v", network.SupportReliableProtos()))
 	var proxyproto proxyprotoFlags
-	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", conn.SupportProtos()))
+	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", network.SupportProtos()))
 	var listenaddrs listenAddrs
 	flag.Var(&listenaddrs, "listen", "server listen addr")
 	name := flag.String("name", "client", "client name")
@@ -102,16 +102,16 @@ func main() {
 	flag.Parse()
 
 	for _, p := range protos {
-		if !conn.HasReliableProto(p) {
-			fmt.Println("[proto] must be " + fmt.Sprintf("%v", conn.SupportReliableProtos()) + "\n")
+		if !network.HasReliableProto(p) {
+			fmt.Println("[proto] must be " + fmt.Sprintf("%v", network.SupportReliableProtos()) + "\n")
 			flag.Usage()
 			return
 		}
 	}
 
 	for _, p := range proxyproto {
-		if !conn.HasProto(p) {
-			fmt.Println("[proxyproto] " + fmt.Sprintf("%v", conn.SupportProtos()) + "\n")
+		if !network.HasProto(p) {
+			fmt.Println("[proxyproto] " + fmt.Sprintf("%v", network.SupportProtos()) + "\n")
 			flag.Usage()
 			return
 		}
