@@ -3,9 +3,9 @@ package proxy
 import (
 	"errors"
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
-	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -27,8 +27,8 @@ type ClientConn struct {
 type Server struct {
 	config      *Config
 	listenaddrs []string
-	listenConns []conn.Conn
-	wg          *group.Group
+	listenConns []network.Conn
+	wg          *thread.Group
 	clients     sync.Map
 }
 
@@ -38,10 +38,10 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 		config = DefaultConfig()
 	}
 
-	var listenConns []conn.Conn
+	var listenConns []network.Conn
 
 	for i, _ := range proto {
-		conn, err := conn.NewConn(proto[i])
+		conn, err := network.NewConn(proto[i])
 		if conn == nil {
 			return nil, err
 		}
@@ -56,7 +56,7 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 		listenConns = append(listenConns, listenConn)
 	}
 
-	wg := group.NewGroup("Server", nil, func() {
+	wg := thread.NewGroup("Server", nil, func() {
 		for i, _ := range listenConns {
 			loggo.Info("group start exit %s", listenConns[i].Info())
 			listenConns[i].Close()
@@ -138,7 +138,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	clientconn.sendch = sendch
 	clientconn.recvch = recvch
 
-	wg := group.NewGroup("Server serveClient"+" "+clientconn.conn.Info(), s.wg, func() {
+	wg := thread.NewGroup("Server serveClient"+" "+clientconn.conn.Info(), s.wg, func() {
 		loggo.Info("group start exit %s", clientconn.conn.Info())
 		clientconn.conn.Close()
 		sendch.Close()
@@ -196,7 +196,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	return nil
 }
 
-func (s *Server) process(wg *group.Group, sendch *common.Channel, recvch *common.Channel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
+func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", clientconn.conn.Info())
 
@@ -233,7 +233,7 @@ func (s *Server) process(wg *group.Group, sendch *common.Channel, recvch *common
 	return nil
 }
 
-func (s *Server) processLogin(wg *group.Group, f *ProxyFrame, sendch *common.Channel, clientconn *ClientConn) {
+func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Channel, clientconn *ClientConn) {
 	loggo.Info("processLogin from %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 
 	clientconn.proxyproto = f.LoginFrame.Proxyproto
@@ -290,7 +290,7 @@ func (s *Server) processLogin(wg *group.Group, f *ProxyFrame, sendch *common.Cha
 	loggo.Info("processLogin ok %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 }
 
-func (s *Server) iniService(wg *group.Group, f *ProxyFrame, clientConn *ClientConn) error {
+func (s *Server) iniService(wg *thread.Group, f *ProxyFrame, clientConn *ClientConn) error {
 	switch f.LoginFrame.Clienttype {
 	case CLIENT_TYPE_PROXY:
 		output, err := NewOutputer(wg, f.LoginFrame.Proxyproto.String(), f.LoginFrame.Clienttype, s.config, &clientConn.ProxyConn)

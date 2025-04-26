@@ -3,9 +3,9 @@ package proxy
 import (
 	"errors"
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
-	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -27,7 +27,7 @@ type Client struct {
 	fromaddr   []string
 	toaddr     []string
 	serverconn []*ServerConn
-	wg         *group.Group
+	wg         *thread.Group
 }
 
 func NewClient(config *Config, serverproto string, server string, name string, clienttypestr string, proxyprotostr []string, fromaddr []string, toaddr []string) (*Client, error) {
@@ -36,7 +36,7 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 		config = DefaultConfig()
 	}
 
-	cn, err := conn.NewConn(serverproto)
+	cn, err := network.NewConn(serverproto)
 	if cn == nil {
 		return nil, err
 	}
@@ -58,7 +58,7 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 		proxyproto = append(proxyproto, PROXY_PROTO(p))
 	}
 
-	wg := group.NewGroup("Clent"+" "+clienttypestr, nil, nil)
+	wg := thread.NewGroup("Clent"+" "+clienttypestr, nil, nil)
 
 	c := &Client{
 		config:     config,
@@ -101,7 +101,7 @@ func (c *Client) Close() {
 	c.wg.Wait()
 }
 
-func (c *Client) connect(index int, conn conn.Conn) error {
+func (c *Client) connect(index int, conn network.Conn) error {
 	loggo.Info("connect start %d %s", index, c.server)
 
 	for !c.wg.IsExit() {
@@ -136,7 +136,7 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	serverconn.sendch = sendch
 	serverconn.recvch = recvch
 
-	wg := group.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
+	wg := thread.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
 		loggo.Info("group start exit %s", serverconn.conn.Info())
 		serverconn.conn.Close()
 		sendch.Close()
@@ -211,7 +211,7 @@ func (c *Client) login(index int, sendch *common.Channel) {
 	loggo.Info("start login %d %s %s", index, c.server, f.LoginFrame.String())
 }
 
-func (c *Client) process(wg *group.Group, index int, sendch *common.Channel, recvch *common.Channel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
+func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, recvch *common.Channel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", serverconn.conn.Info())
 
@@ -249,7 +249,7 @@ func (c *Client) process(wg *group.Group, index int, sendch *common.Channel, rec
 	return nil
 }
 
-func (c *Client) processLoginRsp(wg *group.Group, index int, f *ProxyFrame, sendch *common.Channel, serverconn *ServerConn) {
+func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sendch *common.Channel, serverconn *ServerConn) {
 	if !f.LoginRspFrame.Ret {
 		serverconn.needclose = true
 		loggo.Error("processLoginRsp fail %s %s", c.server, f.LoginRspFrame.Msg)
@@ -267,7 +267,7 @@ func (c *Client) processLoginRsp(wg *group.Group, index int, f *ProxyFrame, send
 	serverconn.established = true
 }
 
-func (c *Client) iniService(wg *group.Group, index int, serverConn *ServerConn) error {
+func (c *Client) iniService(wg *thread.Group, index int, serverConn *ServerConn) error {
 	switch c.clienttype {
 	case CLIENT_TYPE_PROXY:
 		input, err := NewInputer(wg, c.proxyproto[index].String(), c.fromaddr[index], c.clienttype, c.config, &serverConn.ProxyConn, c.toaddr[index])

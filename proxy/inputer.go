@@ -3,10 +3,9 @@ package proxy
 import (
 	"errors"
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
-	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 	"sync"
 	"sync/atomic"
 )
@@ -17,14 +16,14 @@ type Inputer struct {
 	proto      string
 	addr       string
 	father     *ProxyConn
-	fwg        *group.Group
+	fwg        *thread.Group
 
-	listenconn conn.Conn
+	listenconn network.Conn
 	sonny      sync.Map
 }
 
-func NewInputer(wg *group.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string) (*Inputer, error) {
-	conn, err := conn.NewConn(proto)
+func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string) (*Inputer, error) {
+	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
@@ -55,8 +54,8 @@ func NewInputer(wg *group.Group, proto string, addr string, clienttype CLIENT_TY
 	return input, nil
 }
 
-func NewSocks5Inputer(wg *group.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Inputer, error) {
-	conn, err := conn.NewConn(proto)
+func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Inputer, error) {
+	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
@@ -198,7 +197,7 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
 	loggo.Info("processSocks5Conn start %s", proxyConn.conn.Info())
 
-	wg := group.NewGroup("Inputer processSocks5Conn"+" "+proxyConn.conn.Info(), i.fwg, func() {
+	wg := thread.NewGroup("Inputer processSocks5Conn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
 		proxyConn.conn.Close()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
@@ -272,7 +271,7 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	proxyConn.sendch = sendch
 	proxyConn.recvch = recvch
 
-	wg := group.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
+	wg := thread.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
 		proxyConn.conn.Close()
 		sendch.Close()

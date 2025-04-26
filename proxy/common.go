@@ -4,9 +4,9 @@ import (
 	"encoding/binary"
 	"errors"
 	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/conn"
-	"github.com/esrrhs/gohome/group"
 	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 	"github.com/golang/protobuf/proto"
 	"io"
 	"strconv"
@@ -59,7 +59,7 @@ func DefaultConfig() *Config {
 }
 
 type ProxyConn struct {
-	conn        conn.Conn
+	conn        network.Conn
 	established bool
 	sendch      *common.Channel // *ProxyFrame
 	recvch      *common.Channel // *ProxyFrame
@@ -191,7 +191,7 @@ const (
 	MAX_PROTO_PACK_SIZE = 100
 )
 
-func recvFrom(wg *group.Group, recvch *common.Channel, conn conn.Conn, maxmsgsize int, encrypt string) error {
+func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxmsgsize int, encrypt string) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.RecvThread, -1)
@@ -261,7 +261,7 @@ func recvFrom(wg *group.Group, recvch *common.Channel, conn conn.Conn, maxmsgsiz
 	return nil
 }
 
-func sendTo(wg *group.Group, sendch *common.Channel, conn conn.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
+func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
@@ -366,7 +366,7 @@ const (
 	MAX_INDEX = 1024
 )
 
-func recvFromSonny(wg *group.Group, recvch *common.Channel, conn conn.Conn, maxmsgsize int) error {
+func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxmsgsize int) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvSonnyThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.RecvSonnyThread, -1)
@@ -417,7 +417,7 @@ func recvFromSonny(wg *group.Group, recvch *common.Channel, conn conn.Conn, maxm
 	return nil
 }
 
-func sendToSonny(wg *group.Group, sendch *common.Channel, conn conn.Conn, maxmsgsize int) error {
+func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, maxmsgsize int) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendSonnyThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendSonnyThread, -1)
@@ -487,7 +487,7 @@ func sendToSonny(wg *group.Group, sendch *common.Channel, conn conn.Conn, maxmsg
 	return nil
 }
 
-func checkPingActive(wg *group.Group, sendch *common.Channel, recvch *common.Channel, proxyconn *ProxyConn,
+func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, proxyconn *ProxyConn,
 	estimeout int, pinginter int, pingintertimeout int, showping bool, pingflag *int32) error {
 
 	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
@@ -536,7 +536,7 @@ func checkPingActive(wg *group.Group, sendch *common.Channel, recvch *common.Cha
 	return nil
 }
 
-func checkNeedClose(wg *group.Group, proxyconn *ProxyConn) error {
+func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 
 	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.CheckThread, -1)
@@ -571,7 +571,7 @@ func processPong(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, sh
 	}
 }
 
-func checkSonnyActive(wg *group.Group, proxyconn *ProxyConn, estimeout int, timeout int) error {
+func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, timeout int) error {
 
 	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.CheckThread, -1)
@@ -611,7 +611,7 @@ func checkSonnyActive(wg *group.Group, proxyconn *ProxyConn, estimeout int, time
 	return nil
 }
 
-func copySonnyRecv(wg *group.Group, recvch *common.Channel, proxyConn *ProxyConn, father *ProxyConn) error {
+func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyConn, father *ProxyConn) error {
 
 	atomic.AddInt32(&gStateThreadNum.CopyThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.CopyThread, -1)
@@ -710,7 +710,7 @@ var gStateThreadNum StateThreadNum
 var gState State
 var gDeadLock DeadLock
 
-func showState(wg *group.Group) error {
+func showState(wg *thread.Group) error {
 	loggo.Info("showState start ")
 	begin := time.Now()
 	for !wg.IsExit() {
@@ -761,7 +761,7 @@ func showState(wg *group.Group) error {
 	return nil
 }
 
-func checkDeadLock(wg *group.Group) error {
+func checkDeadLock(wg *thread.Group) error {
 	loggo.Info("checkDeadLock start ")
 	begin := time.Now()
 	for !wg.IsExit() {
@@ -783,14 +783,14 @@ func checkDeadLock(wg *group.Group) error {
 	return nil
 }
 
-func setCongestion(c conn.Conn, config *Config) {
+func setCongestion(c network.Conn, config *Config) {
 	if c.Name() == "rudp" {
-		cf := c.(*conn.RudpConn).GetConfig()
+		cf := c.(*network.RudpConn).GetConfig()
 		cf.Congestion = config.Congestion
-		c.(*conn.RudpConn).SetConfig(cf)
+		c.(*network.RudpConn).SetConfig(cf)
 	} else if c.Name() == "ricmp" {
-		cf := c.(*conn.RicmpConn).GetConfig()
+		cf := c.(*network.RicmpConn).GetConfig()
 		cf.Congestion = config.Congestion
-		c.(*conn.RicmpConn).SetConfig(cf)
+		c.(*network.RicmpConn).SetConfig(cf)
 	}
 }
