@@ -1,5 +1,5 @@
 syntax = "proto3";
-option go_package = "proxy";
+option go_package = "./;proxy";
 
 enum PROXY_PROTO {
     TCP = 0;
