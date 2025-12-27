@@ -2,14 +2,15 @@ package proxy
 
 import (
 	"errors"
-	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/loggo"
-	"github.com/esrrhs/gohome/network"
-	"github.com/esrrhs/gohome/thread"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/gohome/thread"
 )
 
 type ServerConn struct {
@@ -76,10 +77,6 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 		return showState(wg)
 	})
 
-	wg.Go("Client check deadlock"+" "+clienttypestr, func() error {
-		return checkDeadLock(wg)
-	})
-
 	for i, _ := range proxyprotostr {
 		index := i
 		toaddrstr := ""
@@ -104,24 +101,36 @@ func (c *Client) Close() {
 func (c *Client) connect(index int, conn network.Conn) error {
 	loggo.Info("connect start %d %s", index, c.server)
 
-	for !c.wg.IsExit() {
-		if c.serverconn[index] == nil {
-			targetconn, err := conn.Dial(c.server)
-			if err != nil {
-				loggo.Error("connect Dial fail: %s %s", c.server, err.Error())
-				time.Sleep(time.Second)
-				continue
+	// 创建一个定时器
+	checkTicker := time.NewTicker(time.Second)
+	defer checkTicker.Stop()
+
+	// 外层死循环
+	exit := false
+	for !exit {
+		select {
+		// 1. 监听退出信号 (最高优先级)
+		case <-c.wg.Done():
+			exit = true
+			break
+			// 2. 定时器触发逻辑
+		case <-checkTicker.C:
+			if c.serverconn[index] == nil {
+				targetconn, err := conn.Dial(c.server)
+				if err != nil {
+					loggo.Error("connect Dial fail: %s %s", c.server, err.Error())
+					break
+				}
+				c.serverconn[index] = &ServerConn{ProxyConn: ProxyConn{conn: targetconn}}
+				c.wg.Go("Client useServer"+" "+targetconn.Info(), func() error {
+					atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
+					defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
+					return c.useServer(index, c.serverconn[index])
+				})
 			}
-			c.serverconn[index] = &ServerConn{ProxyConn: ProxyConn{conn: targetconn}}
-			c.wg.Go("Client useServer"+" "+targetconn.Info(), func() error {
-				atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-				defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
-				return c.useServer(index, c.serverconn[index])
-			})
-		} else {
-			time.Sleep(time.Second)
 		}
 	}
+
 	loggo.Info("connect end %s", c.server)
 	return nil
 }

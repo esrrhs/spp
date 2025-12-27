@@ -3,15 +3,15 @@ package main
 import (
 	"flag"
 	"fmt"
-	"github.com/esrrhs/gohome/common"
-	"github.com/esrrhs/gohome/loggo"
-	"github.com/esrrhs/gohome/network"
-	"github.com/esrrhs/spp/proxy"
 	"net/http"
 	_ "net/http/pprof"
 	"strconv"
 	"strings"
-	"time"
+
+	"github.com/esrrhs/gohome/common"
+	"github.com/esrrhs/gohome/loggo"
+	"github.com/esrrhs/gohome/network"
+	"github.com/esrrhs/spp/proxy"
 )
 
 type fromFlags []string
@@ -233,7 +233,6 @@ func main() {
 		go http.ListenAndServe("0.0.0.0:"+strconv.Itoa(*profile), nil)
 	}
 
-	for {
-		time.Sleep(time.Hour)
-	}
+	// 永久阻塞
+	select {}
 }
