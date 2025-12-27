@@ -218,9 +218,6 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
 
-		gDeadLock.recvTime = time.Now()
-		gDeadLock.recving = true
-
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull body %s %d", conn.Info(), msglen)
 		}
@@ -253,8 +250,6 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 
 		atomic.AddInt32(&gState.MainRecvNum, 1)
 		atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
-
-		gDeadLock.recving = false
 	}
 
 	loggo.Info("recvFrom end %s", conn.Info())
@@ -314,9 +309,6 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
 
-		gDeadLock.sendTime = time.Now()
-		gDeadLock.sending = true
-
 		if loggo.IsDebug() {
 			loggo.Debug("sendTo start Write len %s", conn.Info())
 		}
@@ -353,8 +345,6 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 
 		atomic.AddInt32(&gState.MainSendNum, 1)
 		atomic.AddInt64(&gState.MainSendSize, int64(msglen)+4)
-
-		gDeadLock.sending = false
 	}
 	loggo.Info("sendTo end %s", conn.Info())
 	return nil
@@ -716,16 +706,8 @@ type State struct {
 	SendCompSaveSize int64
 }
 
-type DeadLock struct {
-	sending  bool
-	sendTime time.Time
-	recving  bool
-	recvTime time.Time
-}
-
 var gStateThreadNum StateThreadNum
 var gState State
-var gDeadLock DeadLock
 
 func showState(wg *thread.Group) error {
 	loggo.Info("showState start ")
