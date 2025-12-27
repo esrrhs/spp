@@ -3,15 +3,17 @@ package proxy
 import (
 	"encoding/binary"
 	"errors"
+	"io"
+	"runtime"
+	"strconv"
+	"sync/atomic"
+	"time"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
 	"google.golang.org/protobuf/proto"
-	"io"
-	"strconv"
-	"sync/atomic"
-	"time"
 )
 
 type Config struct {
@@ -201,8 +203,6 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE)
 
 	for !wg.IsExit() {
-		atomic.AddInt32(&gState.RecvFrames, 1)
-
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull len %s", conn.Info())
 		}
@@ -270,8 +270,6 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 	bs := make([]byte, 4)
 
 	for !wg.IsExit() {
-		atomic.AddInt32(&gState.SendFrames, 1)
-
 		var f *ProxyFrame
 		if *pingflag > 0 {
 			*pingflag = 0
@@ -376,8 +374,6 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 
 	index := int32(0)
 	for !wg.IsExit() {
-		atomic.AddInt32(&gState.RecvSonnyFrames, 1)
-
 		msglen, err := conn.Read(ds)
 		if err != nil {
 			loggo.Info("recvFromSonny Read fail: %s %s", conn.Info(), err.Error())
@@ -425,8 +421,6 @@ func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, ma
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
 	for !wg.IsExit() {
-		atomic.AddInt32(&gState.SendSonnyFrames, 1)
-
 		ff := <-sendch.Ch()
 		if ff == nil {
 			break
@@ -495,41 +489,54 @@ func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Ch
 
 	loggo.Info("checkPingActive start %s", proxyconn.conn.Info())
 
-	begin := time.Now()
-	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CheckFrames, 1)
+	// 1. 设置整体超时时间
+	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
+	defer timeoutTimer.Stop()
 
-		if !proxyconn.established {
-			if time.Now().Sub(begin) > time.Second*time.Duration(estimeout) {
+	exit := false
+	for !exit {
+		select {
+		// 优先响应退出信号
+		case <-wg.Done():
+			exit = true
+			break
+
+		// 整体超时触发
+		case <-timeoutTimer.C:
+			if !proxyconn.established {
 				loggo.Info("checkPingActive established timeout %s", proxyconn.conn.Info())
 				return errors.New("established timeout")
 			}
-		} else {
 			break
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
 
-	begin = time.Now()
-	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CheckFrames, 1)
+	// 直接创建一个周期为 pinginter 的 Ticker
+	pingTicker := time.NewTicker(time.Duration(pinginter) * time.Second)
+	defer pingTicker.Stop()
 
-		if time.Now().Sub(begin) > time.Duration(pinginter)*time.Second {
-			begin = time.Now()
+	for !exit {
+		select {
+		// 1. 响应退出信号
+		case <-wg.Done():
+			exit = true
+			break
 
+		// 2. 定时触发 Ping 逻辑
+		case <-pingTicker.C:
+			// 检查心跳超时逻辑
 			if proxyconn.pinged > pingintertimeout {
 				loggo.Info("checkPingActive ping pong timeout %s", proxyconn.conn.Info())
 				return errors.New("ping pong timeout")
 			}
 
+			// 发送心跳逻辑
 			atomic.AddInt32(pingflag, 1)
-
 			proxyconn.pinged++
 			if showping {
 				loggo.Info("ping %s", proxyconn.conn.Info())
 			}
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
 
 	loggo.Info("checkPingActive end %s", proxyconn.conn.Info())
@@ -543,14 +550,26 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 
 	loggo.Info("checkNeedClose start %s", proxyconn.conn.Info())
 
-	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CheckFrames, 1)
+	// 创建定时器
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 
-		if proxyconn.needclose {
-			loggo.Error("checkNeedClose needclose %s", proxyconn.conn.Info())
-			return errors.New("needclose")
+	exit := false
+	for !exit {
+		select {
+		// 1. 响应退出信号 (Group Stop)
+		case <-wg.Done():
+			exit = true
+			break // 跳出 select，回到 for 检查条件 !exit
+
+		// 2. 定时检查逻辑
+		case <-ticker.C:
+			if proxyconn.needclose {
+				loggo.Error("checkNeedClose needclose %s", proxyconn.conn.Info())
+				// 遇到错误通常直接返回，不需要走 exit 流程
+				return errors.New("needclose")
+			}
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
 
 	loggo.Info("checkNeedClose end %s", proxyconn.conn.Info())
@@ -578,35 +597,49 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 
 	loggo.Info("checkSonnyActive start %s", proxyconn.conn.Info())
 
-	begin := time.Now()
-	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CheckFrames, 1)
+	// 1. 设置整体超时时间
+	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
+	defer timeoutTimer.Stop()
 
-		if !proxyconn.established {
-			if time.Now().Sub(begin) > time.Second*time.Duration(estimeout) {
+	exit := false
+	for !exit {
+		select {
+		// 优先响应退出信号
+		case <-wg.Done():
+			exit = true
+			break
+
+		// 整体超时触发
+		case <-timeoutTimer.C:
+			if !proxyconn.established {
 				loggo.Error("checkSonnyActive established timeout %s", proxyconn.conn.Info())
 				return errors.New("established timeout")
 			}
-		} else {
 			break
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
 
-	begin = time.Now()
-	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CheckFrames, 1)
+	// 直接创建一个周期为 timeout 的 Ticker
+	activedTicker := time.NewTicker(time.Duration(timeout) * time.Second)
+	defer activedTicker.Stop()
 
-		if time.Now().Sub(begin) > time.Second*time.Duration(timeout) {
+	for !exit {
+		select {
+		// 1. 响应退出信号
+		case <-wg.Done():
+			exit = true
+			break
+
+		// 2. 定时触发 Ping 逻辑
+		case <-activedTicker.C:
 			if proxyconn.actived == 0 {
 				loggo.Error("checkSonnyActive timeout %s", proxyconn.conn.Info())
 				return errors.New("conn timeout")
 			}
 			proxyconn.actived = 0
-			begin = time.Now()
 		}
-		time.Sleep(time.Millisecond * 100)
 	}
+
 	loggo.Info("checkSonnyActive end %s", proxyconn.conn.Info())
 	return nil
 }
@@ -619,8 +652,6 @@ func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyCon
 	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
 
 	for !wg.IsExit() {
-		atomic.AddInt32(&gState.CopyFrames, 1)
-
 		ff := <-recvch.Ch()
 		if ff == nil {
 			break
@@ -672,20 +703,6 @@ type StateThreadNum struct {
 }
 
 type State struct {
-	RecvFrames      int32
-	SendFrames      int32
-	RecvSonnyFrames int32
-	SendSonnyFrames int32
-	CopyFrames      int32
-	CheckFrames     int32
-
-	RecvFps      int32
-	SendFps      int32
-	RecvSonnyFps int32
-	SendSonnyFps int32
-	CopyFps      int32
-	CheckFps     int32
-
 	MainRecvNum  int32
 	MainSendNum  int32
 	MainRecvSize int64
@@ -712,74 +729,24 @@ var gDeadLock DeadLock
 
 func showState(wg *thread.Group) error {
 	loggo.Info("showState start ")
-	begin := time.Now()
-	for !wg.IsExit() {
-		dur := time.Now().Sub(begin)
-		if dur > time.Minute {
-			begin = time.Now()
 
-			dur := int32(dur / time.Second)
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
 
-			if gStateThreadNum.RecvThread > 0 {
-				gState.RecvFps = gState.RecvFrames / gStateThreadNum.RecvThread / dur
-			} else {
-				gState.RecvFps = 0
-			}
-			if gStateThreadNum.SendThread > 0 {
-				gState.SendFps = gState.SendFrames / gStateThreadNum.SendThread / dur
-			} else {
-				gState.SendFps = 0
-			}
-			if gStateThreadNum.RecvSonnyThread > 0 {
-				gState.RecvSonnyFps = gState.RecvSonnyFrames / gStateThreadNum.RecvSonnyThread / dur
-			} else {
-				gState.RecvSonnyFps = 0
-			}
-			if gStateThreadNum.SendSonnyThread > 0 {
-				gState.SendSonnyFps = gState.SendSonnyFrames / gStateThreadNum.SendSonnyThread / dur
-			} else {
-				gState.SendSonnyFps = 0
-			}
-			if gStateThreadNum.CopyThread > 0 {
-				gState.CopyFps = gState.CopyFrames / gStateThreadNum.CopyThread / dur
-			} else {
-				gState.CopyFps = 0
-			}
-			if gStateThreadNum.CheckThread > 0 {
-				gState.CheckFps = gState.CheckFrames / gStateThreadNum.CheckThread / dur
-			} else {
-				gState.CheckFps = 0
-			}
+	exit := false
+	for !exit {
+		select {
+		case <-wg.Done():
+			exit = true
+			break
 
+		case <-ticker.C:
 			loggo.Info("showState\n%s\n%s", common.StructToTable(&gStateThreadNum), common.StructToTable(&gState))
-
+			loggo.Info("Goroutine Num: %d", runtime.NumGoroutine())
 			gState = State{}
 		}
-		time.Sleep(time.Second)
 	}
 	loggo.Info("showState end")
-	return nil
-}
-
-func checkDeadLock(wg *thread.Group) error {
-	loggo.Info("checkDeadLock start ")
-	begin := time.Now()
-	for !wg.IsExit() {
-		dur := time.Now().Sub(begin)
-		if dur > time.Second {
-			begin = time.Now()
-
-			if gDeadLock.sending && time.Now().Sub(gDeadLock.sendTime) > 5*time.Second {
-				loggo.Error("send dead lock %v", time.Now().Sub(gDeadLock.sendTime))
-			}
-			if gDeadLock.recving && time.Now().Sub(gDeadLock.recvTime) > 5*time.Second {
-				loggo.Error("recv dead lock")
-				loggo.Error("send dead lock %v", time.Now().Sub(gDeadLock.recvTime))
-			}
-		}
-		time.Sleep(time.Millisecond * 300)
-	}
-	loggo.Info("checkDeadLock end")
 	return nil
 }
 
