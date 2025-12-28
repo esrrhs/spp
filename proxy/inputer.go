@@ -2,12 +2,13 @@ package proxy
 
 import (
 	"errors"
+	"sync"
+	"sync/atomic"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
-	"sync"
-	"sync/atomic"
 )
 
 type Inputer struct {
@@ -44,8 +45,6 @@ func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_T
 	}
 
 	wg.Go("Inputer listen"+" "+targetAddr, func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return input.listen(targetAddr)
 	})
 
@@ -76,8 +75,6 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 	}
 
 	wg.Go("Inputer listenSocks5"+" "+addr, func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return input.listenSocks5()
 	})
 
@@ -155,8 +152,8 @@ func (i *Inputer) listen(targetAddr string) error {
 
 		proxyconn := &ProxyConn{conn: conn}
 		i.fwg.Go("Inputer processProxyConn"+" "+targetAddr, func() error {
-			atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-			defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
+			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
+			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
 			return i.processProxyConn(proxyconn, targetAddr)
 		})
 	}
@@ -184,8 +181,8 @@ func (i *Inputer) listenSocks5() error {
 
 		proxyconn := &ProxyConn{conn: conn}
 		i.fwg.Go("Inputer processSocks5Conn"+" "+conn.Info(), func() error {
-			atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-			defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
+			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
+			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
 			return i.processSocks5Conn(proxyconn)
 		})
 	}
@@ -205,9 +202,6 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
 	targetAddr := ""
 	wg.Go("Inputer socks5"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
-
 		if proxyConn.conn.Name() != "tcp" {
 			loggo.Error("processSocks5Conn no tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
 			return errors.New("socks5 not tcp")
@@ -244,8 +238,6 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 	loggo.Info("processSocks5Conn ok %s %s", proxyConn.conn.Info(), targetAddr)
 
 	i.fwg.Go("Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return i.processProxyConn(proxyConn, targetAddr)
 	})
 
@@ -282,32 +274,22 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	i.openConn(proxyConn, targetAddr)
 
 	wg.Go("Inputer recvFromSonny"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return recvFromSonny(wg, recvch, proxyConn.conn, i.config.MaxMsgSize)
 	})
 
 	wg.Go("Inputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return sendToSonny(wg, sendch, proxyConn.conn, i.config.MaxMsgSize)
 	})
 
 	wg.Go("Inputer checkSonnyActive"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkSonnyActive(wg, proxyConn, i.config.EstablishedTimeout, i.config.ConnTimeout)
 	})
 
 	wg.Go("Inputer checkNeedClose"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkNeedClose(wg, proxyConn)
 	})
 
 	wg.Go("Inputer copySonnyRecv"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return copySonnyRecv(wg, recvch, proxyConn, i.father)
 	})
 

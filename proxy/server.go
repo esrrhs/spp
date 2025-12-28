@@ -2,13 +2,13 @@ package proxy
 
 import (
 	"errors"
+	"strconv"
+	"sync"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
-	"strconv"
-	"sync"
-	"sync/atomic"
 )
 
 type ClientConn struct {
@@ -74,8 +74,6 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 	for i, _ := range proto {
 		index := i
 		wg.Go("Server listen"+" "+listenaddrs[i], func() error {
-			atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-			defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 			return s.listen(index)
 		})
 	}
@@ -110,8 +108,6 @@ func (s *Server) listen(index int) error {
 
 		clientconn := &ClientConn{ProxyConn: ProxyConn{conn: conn}}
 		s.wg.Go("Server serveClient"+" "+conn.Info(), func() error {
-			atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-			defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 			return s.serveClient(clientconn)
 		})
 	}
@@ -157,32 +153,22 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	var pongtime int64
 
 	wg.Go("Server recvFrom"+" "+clientconn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return recvFrom(wg, recvch, clientconn.conn, s.config.MaxMsgSize, s.config.Encrypt)
 	})
 
 	wg.Go("Server sendTo"+" "+clientconn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return sendTo(wg, sendch, clientconn.conn, s.config.Compress, s.config.MaxMsgSize, s.config.Encrypt, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Server checkPingActive"+" "+clientconn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkPingActive(wg, sendch, recvch, &clientconn.ProxyConn, s.config.EstablishedTimeout, s.config.PingInter, s.config.PingTimeoutInter, s.config.ShowPing, &pingflag)
 	})
 
 	wg.Go("Server checkNeedClose"+" "+clientconn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkNeedClose(wg, &clientconn.ProxyConn)
 	})
 
 	wg.Go("Server process"+" "+clientconn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return s.process(wg, sendch, recvch, clientconn, &pongflag, &pongtime)
 	})
 

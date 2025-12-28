@@ -53,8 +53,8 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MaxClient:                 8,
-		MaxSonny:                  128,
+		MaxClient:                 32,
+		MaxSonny:                  1024,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
 	}
@@ -355,10 +355,6 @@ const (
 )
 
 func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxmsgsize int) error {
-
-	atomic.AddInt32(&gStateThreadNum.RecvSonnyThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.RecvSonnyThread, -1)
-
 	loggo.Info("recvFromSonny start %s", conn.Info())
 	ds := make([]byte, maxmsgsize)
 
@@ -404,10 +400,6 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 }
 
 func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, maxmsgsize int) error {
-
-	atomic.AddInt32(&gStateThreadNum.SendSonnyThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.SendSonnyThread, -1)
-
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
 	for !wg.IsExit() {
@@ -474,9 +466,6 @@ func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, ma
 func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, proxyconn *ProxyConn,
 	estimeout int, pinginter int, pingintertimeout int, showping bool, pingflag *int32) error {
 
-	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.CheckThread, -1)
-
 	loggo.Info("checkPingActive start %s", proxyconn.conn.Info())
 
 	// 1. 设置整体超时时间
@@ -534,10 +523,6 @@ func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Ch
 }
 
 func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
-
-	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.CheckThread, -1)
-
 	loggo.Info("checkNeedClose start %s", proxyconn.conn.Info())
 
 	// 创建定时器
@@ -581,10 +566,6 @@ func processPong(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, sh
 }
 
 func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, timeout int) error {
-
-	atomic.AddInt32(&gStateThreadNum.CheckThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.CheckThread, -1)
-
 	loggo.Info("checkSonnyActive start %s", proxyconn.conn.Info())
 
 	// 1. 设置整体超时时间
@@ -635,10 +616,6 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 }
 
 func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyConn, father *ProxyConn) error {
-
-	atomic.AddInt32(&gStateThreadNum.CopyThread, 1)
-	defer atomic.AddInt32(&gStateThreadNum.CopyThread, -1)
-
 	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
 
 	for !wg.IsExit() {
@@ -683,13 +660,10 @@ func closeRemoteConn(proxyConn *ProxyConn, father *ProxyConn) {
 }
 
 type StateThreadNum struct {
-	ThreadNum       int32
-	RecvThread      int32
-	SendThread      int32
-	RecvSonnyThread int32
-	SendSonnyThread int32
-	CopyThread      int32
-	CheckThread     int32
+	RecvThread          int32
+	SendThread          int32
+	InputerSonnyThread  int32
+	OutputerSonnyThread int32
 }
 
 type State struct {

@@ -1,13 +1,14 @@
 package proxy
 
 import (
+	"os"
+	"sync"
+	"sync/atomic"
+
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
-	"os"
-	"sync"
-	"sync/atomic"
 )
 
 type Outputer struct {
@@ -124,8 +125,6 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 
 	var conn network.Conn
 	wg.Go("Outputer Dial"+" "+targetAddr, func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		cc, err := c.Dial(targetAddr)
 		if err != nil {
 			return err
@@ -201,8 +200,8 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	proxyconn.recvch = recvch
 
 	o.fwg.Go("Outputer processProxyConn"+" "+targetAddr, func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
+		atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, 1)
+		defer atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, -1)
 		return o.processProxyConn(proxyconn, targetAddr)
 	})
 }
@@ -231,32 +230,22 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 	})
 
 	wg.Go("Outputer recvFromSonny"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return recvFromSonny(wg, recvch, proxyConn.conn, o.config.MaxMsgSize)
 	})
 
 	wg.Go("Outputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return sendToSonny(wg, sendch, proxyConn.conn, o.config.MaxMsgSize)
 	})
 
 	wg.Go("Outputer checkSonnyActive"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkSonnyActive(wg, proxyConn, o.config.EstablishedTimeout, o.config.ConnTimeout)
 	})
 
 	wg.Go("Outputer checkNeedClose"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return checkNeedClose(wg, proxyConn)
 	})
 
 	wg.Go("Outputer copySonnyRecv"+" "+proxyConn.conn.Info(), func() error {
-		atomic.AddInt32(&gStateThreadNum.ThreadNum, 1)
-		defer atomic.AddInt32(&gStateThreadNum.ThreadNum, -1)
 		return copySonnyRecv(wg, recvch, proxyConn, o.father)
 	})
 
