@@ -472,28 +472,25 @@ func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Ch
 	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
 	defer timeoutTimer.Stop()
 
-	exit := false
-	for !exit {
-		select {
-		// 优先响应退出信号
-		case <-wg.Done():
-			exit = true
-			break
+	select {
+	// 优先响应退出信号
+	case <-wg.Done():
+		break
 
-		// 整体超时触发
-		case <-timeoutTimer.C:
-			if !proxyconn.established {
-				loggo.Info("checkPingActive established timeout %s", proxyconn.conn.Info())
-				return errors.New("established timeout")
-			}
-			break
+	// 整体超时触发
+	case <-timeoutTimer.C:
+		if !proxyconn.established {
+			loggo.Info("checkPingActive established timeout %s", proxyconn.conn.Info())
+			return errors.New("established timeout")
 		}
+		break
 	}
 
 	// 直接创建一个周期为 pinginter 的 Ticker
 	pingTicker := time.NewTicker(time.Duration(pinginter) * time.Second)
 	defer pingTicker.Stop()
 
+	exit := false
 	for !exit {
 		select {
 		// 1. 响应退出信号
@@ -572,28 +569,25 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
 	defer timeoutTimer.Stop()
 
-	exit := false
-	for !exit {
-		select {
-		// 优先响应退出信号
-		case <-wg.Done():
-			exit = true
-			break
+	select {
+	// 优先响应退出信号
+	case <-wg.Done():
+		break
 
-		// 整体超时触发
-		case <-timeoutTimer.C:
-			if !proxyconn.established {
-				loggo.Error("checkSonnyActive established timeout %s", proxyconn.conn.Info())
-				return errors.New("established timeout")
-			}
-			break
+	// 整体超时触发
+	case <-timeoutTimer.C:
+		if !proxyconn.established {
+			loggo.Error("checkSonnyActive established timeout %s", proxyconn.conn.Info())
+			return errors.New("established timeout")
 		}
+		break
 	}
 
 	// 直接创建一个周期为 timeout 的 Ticker
 	activedTicker := time.NewTicker(time.Duration(timeout) * time.Second)
 	defer activedTicker.Stop()
 
+	exit := false
 	for !exit {
 		select {
 		// 1. 响应退出信号
