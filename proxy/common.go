@@ -53,8 +53,8 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MaxClient:                 32,
-		MaxSonny:                  1024,
+		MaxClient:                 1024,
+		MaxSonny:                  10240,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
 	}
