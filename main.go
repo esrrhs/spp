@@ -96,8 +96,8 @@ func main() {
 	ping := flag.Bool("ping", false, "show ping")
 	username := flag.String("username", "", "socks5 username")
 	password := flag.String("password", "", "socks5 password")
-	maxclient := flag.Int("maxclient", 8, "max client connection")
-	maxconn := flag.Int("maxconn", 128, "max connection")
+	maxclient := flag.Int("maxclient", 1024, "max client connection")
+	maxconn := flag.Int("maxconn", 10240, "max connection")
 
 	flag.Parse()
 
