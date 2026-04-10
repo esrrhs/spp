@@ -1,8 +1,0 @@
-[DEBUG] [2026-04-10T10:10:30.582451852Z] [common.go:126] [github.com/esrrhs/spp/proxy.MarshalSrpFrame] MarshalSrpFrame Compress from 110 49
-[DEBUG] [2026-04-10T10:10:30.582591062Z] [common.go:140] [github.com/esrrhs/spp/proxy.MarshalSrpFrame] MarshalSrpFrame Rc4 from 68fff6c2 c16dcedd
-[DEBUG] [2026-04-10T10:10:30.582760595Z] [common.go:171] [github.com/esrrhs/spp/proxy.UnmarshalSrpFrame] UnmarshalSrpFrame Rc4 from c16dcedd 68fff6c2
-[DEBUG] [2026-04-10T10:10:30.582806489Z] [common.go:182] [github.com/esrrhs/spp/proxy.UnmarshalSrpFrame] UnmarshalSrpFrame Compress from 49 110
-[DEBUG] [2026-04-10T10:10:57.829981178Z] [common.go:126] [github.com/esrrhs/spp/proxy.MarshalSrpFrame] MarshalSrpFrame Compress from 110 49
-[DEBUG] [2026-04-10T10:10:57.830194674Z] [common.go:140] [github.com/esrrhs/spp/proxy.MarshalSrpFrame] MarshalSrpFrame Rc4 from 68fff6c2 c16dcedd
-[DEBUG] [2026-04-10T10:10:57.830656787Z] [common.go:171] [github.com/esrrhs/spp/proxy.UnmarshalSrpFrame] UnmarshalSrpFrame Rc4 from c16dcedd 68fff6c2
-[DEBUG] [2026-04-10T10:10:57.830820325Z] [common.go:182] [github.com/esrrhs/spp/proxy.UnmarshalSrpFrame] UnmarshalSrpFrame Compress from 49 110
