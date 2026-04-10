@@ -99,7 +99,7 @@ func (i *Inputer) processDataFrame(f *ProxyFrame) {
 		sonny.needclose = true
 		loggo.Error("Inputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
-	sonny.actived++
+	atomic.AddInt32(&sonny.actived, 1)
 	loggo.Debug("Inputer processDataFrame %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 }
 

@@ -58,7 +58,7 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 		proxyproto = append(proxyproto, PROXY_PROTO(p))
 	}
 
-	wg := thread.NewGroup("Clent"+" "+clienttypestr, nil, nil)
+	wg := thread.NewGroup("Client"+" "+clienttypestr, nil, nil)
 
 	c := &Client{
 		config:     config,
@@ -254,6 +254,7 @@ func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sen
 
 	err := c.iniService(wg, index, serverconn)
 	if err != nil {
+		serverconn.needclose = true
 		loggo.Error("processLoginRsp iniService fail %s %s", c.server, err)
 		return
 	}
