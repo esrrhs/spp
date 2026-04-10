@@ -15,10 +15,10 @@ SPP is a simple and powerful proxy
 ![image](show.png)
 
 # Features
-* Supported protocol: TCP, UDP, RUDP (Reliable UDP), RICMP (Reliable ICMP), RHTTP (Reliable HTTP), KCP, Quic
-* Support type: forward proxy, reverse agent, SOCKS5 forward agent, SOCKS5 reverse agent
-* Agreement and type can be freely combined
-* External agent agreement and internal forwarding protocols can freely combine
+* Supported protocols: TCP, UDP, RUDP (Reliable UDP), RICMP (Reliable ICMP), RHTTP (Reliable HTTP), KCP, Quic
+* Supported types: forward proxy, reverse proxy, SOCKS5 forward proxy, SOCKS5 reverse proxy
+* Protocols and types can be freely combined
+* External proxy protocols and internal forwarding protocols can be freely combined
 * Support Shadowsocks plug-in, [spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin)，[spp-shadowsocks-plugin-android](https://github.com/esrrhs/spp-shadowsocks-plugin-android)
 
 # Instructions
@@ -40,19 +40,19 @@ SPP is a simple and powerful proxy
 ```
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
 ```
-* Start the TCP reverse agent, map the local 8080 to the 8080 port of www.server.com, which visit www.server.com 8080 is equivalent to accessing the local 8080
+* Start the TCP reverse proxy, map the local 8080 to the 8080 port of www.server.com, so that visiting www.server.com:8080 is equivalent to accessing the local 8080
 ```
 # ./spp -name "test" -type reverse_proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
 ```
-* Start TCP Positive Socks5 Agent, open the SOCKS5 protocol in the local 8080 port, access the network in Server through Server
+* Start TCP Forward SOCKS5 Proxy, open the SOCKS5 protocol on the local 8080 port, access the network through the Server
 ```
 # ./spp -name "test" -type socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
 ```
-* Start TCP Reverse Socks5 Agent, open the Socks5 protocol at www.server.com's 8080 port, access the network in the client through the Client
+* Start TCP Reverse SOCKS5 Proxy, open the SOCKS5 protocol on www.server.com's 8080 port, access the network through the Client
 ```
 # ./spp -name "test" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
 ```
-* Other proxy protocols, only need to modify the proxyProto parameters of the client, for example
+* Other proxy protocols only need to modify the -proxyproto parameter of the client, for example
 
 ```
 Proxy UDP
@@ -68,7 +68,7 @@ At the same time, the above three
 # ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -fromaddr :8081 -toaddr :8081 -proxyproto rudp -fromaddr :8082 -toaddr :8082 -proxyproto ricmp
 
 ```
-* Internal communication between Client and Server, can also be modified to other protocols, automatic conversion between external protocols and internal protocols. E.g
+* Internal communication between Client and Server can also use other protocols; automatic conversion between external protocols and internal protocols is supported. E.g
 
 ```
 Proxy TCP, internal RUDP protocol forwarding
@@ -96,7 +96,7 @@ Proxy TCP, internal RHTTP protocol forwarding
 ```
 
 # Performance Testing
-* Test the maximum bandwidth speed in the case where the IPERF script using the Benchmark / local_tcp directory is tested in the CPU. The proxy protocol is TCP, and the results of various transit protocols are used as follows:
+* Using the IPERF script in the Benchmark/local_tcp directory, tested on a single machine (CPU-bound), the maximum bandwidth with TCP as the proxy protocol and various transit protocols is as follows:
 
 |     Agent | Speed | Speed (Ency) | Speed (Encryption Compression)
 |--------------|----------|----------|----------|
@@ -108,7 +108,7 @@ Proxy TCP, internal RHTTP protocol forwarding
 | kcp forwarding  | 18.2 MBytes/sec | 18.6 MBytes/sec| 14.7 MBytes/sec|
 | quic forwarding  | 35.5 MBytes/sec | 32.8 MBytes/sec|15.1 MBytes/sec |
 
-* Using the IPERF script of the Benchmark / Remote_TCP directory, in the multi-machine test, the server is located in Tencent Cloud, the client is located locally, and the maximum bandwidth speed is tested. The proxy protocol is TCP, and the results of various transit protocols are used as follows:
+* Using the IPERF script in the Benchmark/remote_tcp directory, tested across multiple machines (server on Tencent Cloud, client local), the maximum bandwidth with TCP as the proxy protocol and various transit protocols is as follows:
 
 |     Agent | Speed | Speed (Ency) | Speed (Encryption Compression)
 |--------------|----------|----------|----------|
