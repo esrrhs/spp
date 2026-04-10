@@ -81,7 +81,7 @@ func (o *Outputer) processDataFrame(f *ProxyFrame) {
 		sonny.needclose = true
 		loggo.Error("Outputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
-	sonny.actived++
+	atomic.AddInt32(&sonny.actived, 1)
 	loggo.Debug("Outputer processDataFrame %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 }
 

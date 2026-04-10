@@ -65,8 +65,8 @@ type ProxyConn struct {
 	established bool
 	sendch      *common.Channel // *ProxyFrame
 	recvch      *common.Channel // *ProxyFrame
-	actived     int
-	pinged      int
+	actived     int32
+	pinged      int32
 	id          string
 	needclose   bool
 }
@@ -213,7 +213,7 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 		}
 
 		msglen := binary.LittleEndian.Uint32(bs)
-		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen <= 0 {
+		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen == 0 {
 			loggo.Error("recvFrom len fail: %s %d", conn.Info(), msglen)
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
@@ -233,11 +233,6 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 			return err
 		}
 
-		if loggo.IsDebug() {
-			loggo.Debug("recvFrom start Write %s", conn.Info())
-		}
-		recvch.Write(f)
-
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("recvFrom %s %s", conn.Info(), f.Type.String())
 			if f.Type == FRAME_TYPE_DATA {
@@ -247,6 +242,11 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 				}
 			}
 		}
+
+		if loggo.IsDebug() {
+			loggo.Debug("recvFrom start Write %s", conn.Info())
+		}
+		recvch.Write(f)
 
 		atomic.AddInt32(&gState.MainRecvNum, 1)
 		atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
@@ -266,14 +266,14 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 
 	for !wg.IsExit() {
 		var f *ProxyFrame
-		if *pingflag > 0 {
-			*pingflag = 0
+		if atomic.LoadInt32(pingflag) > 0 {
+			atomic.StoreInt32(pingflag, 0)
 			f = &ProxyFrame{}
 			f.Type = FRAME_TYPE_PING
 			f.PingFrame = &PingFrame{}
 			f.PingFrame.Time = time.Now().UnixNano()
-		} else if *pongflag > 0 {
-			*pongflag = 0
+		} else if atomic.LoadInt32(pongflag) > 0 {
+			atomic.StoreInt32(pongflag, 0)
 			f = &ProxyFrame{}
 			f.Type = FRAME_TYPE_PONG
 			f.PongFrame = &PongFrame{}
@@ -304,7 +304,7 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 		}
 
 		msglen := uint32(len(mb))
-		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen <= 0 {
+		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen == 0 {
 			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
@@ -501,14 +501,14 @@ func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Ch
 		// 2. 定时触发 Ping 逻辑
 		case <-pingTicker.C:
 			// 检查心跳超时逻辑
-			if proxyconn.pinged > pingintertimeout {
+			if atomic.LoadInt32(&proxyconn.pinged) > int32(pingintertimeout) {
 				loggo.Info("checkPingActive ping pong timeout %s", proxyconn.conn.Info())
 				return errors.New("ping pong timeout")
 			}
 
 			// 发送心跳逻辑
 			atomic.AddInt32(pingflag, 1)
-			proxyconn.pinged++
+			atomic.AddInt32(&proxyconn.pinged, 1)
 			if showping {
 				loggo.Info("ping %s", proxyconn.conn.Info())
 			}
@@ -556,7 +556,7 @@ func processPing(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, po
 
 func processPong(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, showping bool) {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
-	proxyconn.pinged = 0
+	atomic.StoreInt32(&proxyconn.pinged, 0)
 	if showping {
 		loggo.Info("pong %s %s", proxyconn.conn.Info(), elapse.String())
 	}
@@ -597,11 +597,11 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 
 		// 2. 定时触发 Ping 逻辑
 		case <-activedTicker.C:
-			if proxyconn.actived == 0 {
+			if atomic.LoadInt32(&proxyconn.actived) == 0 {
 				loggo.Error("checkSonnyActive timeout %s", proxyconn.conn.Info())
 				return errors.New("conn timeout")
 			}
-			proxyconn.actived = 0
+			atomic.StoreInt32(&proxyconn.actived, 0)
 		}
 	}
 
@@ -633,7 +633,7 @@ func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyCon
 			}
 		}
 		f.DataFrame.Id = proxyConn.id
-		proxyConn.actived++
+		atomic.AddInt32(&proxyConn.actived, 1)
 
 		father.sendch.Write(f)
 
