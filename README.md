@@ -92,9 +92,3 @@ Maximum single-machine bandwidth testing with TCP proxy over various internal tr
 | RICMP Forwarding | 3.34 MB/s | 3.25 MB/s | 3.46 MB/s |
 
 ---
-
-## Acknowledgements
-
-Special thanks to JetBrains for providing free open-source software development licenses:
-
-<img src="https://resources.jetbrains.com/storage/products/company/brand/logos/GoLand.png" height="120" alt="JetBrains Logo"/>
