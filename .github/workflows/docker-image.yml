@@ -6,6 +6,7 @@ on:
     tags: [ "v*" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
 
 jobs:
   build:
@@ -31,7 +32,7 @@ jobs:
             type=ref,event=tag
 
       - name: Login to DockerHub
-        if: github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != ''
+        if: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != '' }}
         uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -44,5 +45,5 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME != '' }}
-          tags: ${{ steps.meta.outputs.tags || 'esrrhs/spp:latest' }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
