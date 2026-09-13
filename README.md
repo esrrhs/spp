@@ -95,6 +95,24 @@ Proxy TCP, internal RHTTP protocol forwarding
 # docker run --name my-client -d --restart=always --network host esrrhs/spp ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
 ```
 
+### Configuration File
+* You can start SPP using a JSON configuration file instead of command-line flags:
+```
+# Server
+# ./spp -config config_server.json
+
+# Client
+# ./spp -config config_client.json
+```
+* Command-line arguments can override settings defined in the configuration file.
+
+### Version & Diagnostics
+* Print version and build details:
+```
+# ./spp -version
+# ./spp -v
+```
+
 # Performance Testing
 * Using the IPERF script in the Benchmark/local_tcp directory, tested on a single machine (CPU-bound), the maximum bandwidth with TCP as the proxy protocol and various transit protocols is as follows:
 

@@ -92,7 +92,7 @@ func (s *Server) Close() {
 
 func (s *Server) listen(index int) error {
 	loggo.Info("listen start %d %s", index, s.listenaddrs[index])
-	for !s.wg.IsExit() {
+	for !isExit(s.wg) {
 		conn, err := s.listenConns[index].Accept()
 		if err != nil {
 			loggo.Info("Server listen Accept fail %s", err)
@@ -186,7 +186,7 @@ func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *commo
 
 	loggo.Info("process start %s", clientconn.conn.Info())
 
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		ff := <-recvch.Ch()
 		if ff == nil {
 			break

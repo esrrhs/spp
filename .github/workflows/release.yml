@@ -1,0 +1,99 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    name: Build Release Binary
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - os: linux
+            arch: amd64
+          - os: linux
+            arch: arm64
+          - os: linux
+            arch: 386
+          - os: darwin
+            arch: amd64
+          - os: darwin
+            arch: arm64
+          - os: windows
+            arch: amd64
+          - os: windows
+            arch: arm64
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: Build Binary
+        id: build
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.os }}
+          GOARCH: ${{ matrix.arch }}
+        run: |
+          VERSION="${GITHUB_REF_NAME}"
+          GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+          BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          LDFLAGS="-s -w -X 'github.com/esrrhs/spp/version.Version=${VERSION}' -X 'github.com/esrrhs/spp/version.GitCommit=${GIT_COMMIT}' -X 'github.com/esrrhs/spp/version.BuildTime=${BUILD_TIME}'"
+
+          BIN_NAME="spp"
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            BIN_NAME="spp.exe"
+          fi
+
+          go build -ldflags="${LDFLAGS}" -o "${BIN_NAME}" .
+
+          ARCHIVE_NAME="spp_${VERSION}_${{ matrix.os }}_${{ matrix.arch }}"
+          mkdir -p dist
+          if [ "${{ matrix.os }}" = "windows" ]; then
+            zip "dist/${ARCHIVE_NAME}.zip" "${BIN_NAME}"
+          else
+            tar -czvf "dist/${ARCHIVE_NAME}.tar.gz" "${BIN_NAME}"
+          fi
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.os }}-${{ matrix.arch }}
+          path: dist/*
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download all built artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: assets-*
+          merge-multiple: true
+          path: release-assets
+
+      - name: Generate Checksums
+        run: |
+          cd release-assets
+          sha256sum * > checksums.txt
+          cat checksums.txt
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: release-assets/*
+          generate_release_notes: true

@@ -1,0 +1,23 @@
+{
+  "name": "test_client",
+  "type": "proxy_client",
+  "server": "127.0.0.1:8888",
+  "proto": [
+    "tcp"
+  ],
+  "proxyproto": [
+    "tcp"
+  ],
+  "fromaddr": [
+    ":8080"
+  ],
+  "toaddr": [
+    ":8080"
+  ],
+  "key": "123456",
+  "encrypt": "default",
+  "compress": 128,
+  "loglevel": "info",
+  "nolog": 0,
+  "noprint": 0
+}
