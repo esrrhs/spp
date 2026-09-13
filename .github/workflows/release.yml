@@ -2,21 +2,87 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
+    branches: [ "master" ]
+    tags: [ "v*" ]
   workflow_dispatch:
     inputs:
       version:
         description: 'Release version tag (e.g. v0.8.0)'
         required: false
-        default: 'v0.8.0'
 
 permissions:
   contents: write
 
 jobs:
+  check-version:
+    name: Check Version Change
+    runs-on: ubuntu-latest
+    outputs:
+      should_release: ${{ steps.check.outputs.should_release }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check if Version Changed
+        id: check
+        run: |
+          # Case 1: Triggered by manual workflow_dispatch
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            INPUT_VER="${{ inputs.version }}"
+            if [ -n "$INPUT_VER" ]; then
+              TAG="$INPUT_VER"
+            else
+              VER=$(grep -E '^\s*Version\s*=\s*"[^"]+"' version/version.go | sed -E 's/.*"([^"]+)".*/\1/')
+              TAG="v${VER#v}"
+            fi
+            echo "Triggered manually: $TAG"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Case 2: Triggered by Git Tag push (v*)
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            TAG="${{ github.ref_name }}"
+            echo "Triggered by tag push: $TAG"
+            echo "should_release=true" >> $GITHUB_OUTPUT
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Case 3: Triggered by push to master branch
+          VER=$(grep -E '^\s*Version\s*=\s*"[^"]+"' version/version.go | sed -E 's/.*"([^"]+)".*/\1/')
+          TAG="v${VER#v}"
+          echo "Current code version: $TAG"
+
+          # Check if tag already exists in remote
+          if git rev-parse "$TAG" >/dev/null 2>&1 || git ls-remote --tags origin "refs/tags/$TAG" | grep -q "$TAG"; then
+            echo "Tag $TAG already exists on remote. Skipping release."
+            echo "should_release=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if version/version.go was changed in this push
+          BEFORE="${{ github.event.before }}"
+          if [ -n "$BEFORE" ] && [ "$BEFORE" != "0000000000000000000000000000000000000000" ]; then
+            if ! git diff --name-only "$BEFORE" "${{ github.sha }}" | grep -q "^version/version.go$"; then
+              echo "version/version.go was not modified in this push. Skipping release."
+              echo "should_release=false" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+          fi
+
+          echo "Version changed to $TAG and tag does not exist. Triggering automatic release!"
+          echo "should_release=true" >> $GITHUB_OUTPUT
+          echo "version=$TAG" >> $GITHUB_OUTPUT
+
   build-release:
-    name: Build Release Binary
+    name: Build Release Binary (${{ matrix.os }}/${{ matrix.arch }})
+    needs: check-version
+    if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -51,7 +117,7 @@ jobs:
           GOOS: ${{ matrix.os }}
           GOARCH: ${{ matrix.arch }}
         run: |
-          VERSION="${{ inputs.version || github.ref_name }}"
+          VERSION="${{ needs.check-version.outputs.version }}"
           GIT_COMMIT="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
           BUILD_TIME="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           LDFLAGS="-s -w -X 'github.com/esrrhs/spp/version.Version=${VERSION}' -X 'github.com/esrrhs/spp/version.GitCommit=${GIT_COMMIT}' -X 'github.com/esrrhs/spp/version.BuildTime=${BUILD_TIME}'"
@@ -79,7 +145,8 @@ jobs:
 
   publish-release:
     name: Publish GitHub Release
-    needs: build-release
+    needs: [check-version, build-release]
+    if: needs.check-version.outputs.should_release == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -101,6 +168,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.version || github.ref_name }}
+          tag_name: ${{ needs.check-version.outputs.version }}
           files: release-assets/*
           generate_release_notes: true
