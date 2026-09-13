@@ -1,0 +1,17 @@
+{
+  "type": "server",
+  "proto": [
+    "tcp"
+  ],
+  "listen": [
+    ":8888"
+  ],
+  "key": "123456",
+  "encrypt": "default",
+  "compress": 128,
+  "loglevel": "info",
+  "nolog": 0,
+  "noprint": 0,
+  "maxclient": 1024,
+  "maxconn": 10240
+}

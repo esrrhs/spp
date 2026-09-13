@@ -209,7 +209,7 @@ func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, re
 
 	loggo.Info("process start %s", serverconn.conn.Info())
 
-	for !wg.IsExit() {
+	for !isExit(wg) {
 
 		ff := <-recvch.Ch()
 		if ff == nil {

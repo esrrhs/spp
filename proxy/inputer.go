@@ -136,7 +136,7 @@ func (i *Inputer) listen(targetAddr string) error {
 
 	loggo.Info("Inputer start listen %s %s", i.addr, targetAddr)
 
-	for !i.fwg.IsExit() {
+	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
 			loggo.Info("Inputer listen Accept fail %s", err)
@@ -165,7 +165,7 @@ func (i *Inputer) listenSocks5() error {
 
 	loggo.Info("Inputer start listenSocks5 %s", i.addr)
 
-	for !i.fwg.IsExit() {
+	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
 			loggo.Info("Inputer listen Accept fail %s", err)

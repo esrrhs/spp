@@ -112,6 +112,18 @@ func checkProxyFame(f *ProxyFrame) error {
 	return nil
 }
 
+func isExit(wg *thread.Group) bool {
+	if wg == nil {
+		return true
+	}
+	select {
+	case <-wg.Done():
+		return true
+	default:
+		return false
+	}
+}
+
 func MarshalSrpFrame(f *ProxyFrame, compress int, encrpyt string) ([]byte, error) {
 
 	err := checkProxyFame(f)
@@ -202,7 +214,7 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 	bs := make([]byte, 4)
 	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE)
 
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull len %s", conn.Info())
 		}
@@ -264,7 +276,7 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 	loggo.Info("sendTo start %s", conn.Info())
 	bs := make([]byte, 4)
 
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		var f *ProxyFrame
 		if atomic.LoadInt32(pingflag) > 0 {
 			atomic.StoreInt32(pingflag, 0)
@@ -297,6 +309,16 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 				continue
 			}
 		}
+		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
+			loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
+			if f.Type == FRAME_TYPE_DATA {
+				if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
+					loggo.Error("sendTo crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
+					return errors.New("conn crc error")
+				}
+			}
+		}
+
 		mb, err := MarshalSrpFrame(f, compress, encrypt)
 		if err != nil {
 			loggo.Error("sendTo MarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
@@ -333,16 +355,6 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 			return errors.New("len error")
 		}
 
-		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
-			loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
-			if f.Type == FRAME_TYPE_DATA {
-				if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
-					loggo.Error("sendTo crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
-					return errors.New("conn crc error")
-				}
-			}
-		}
-
 		atomic.AddInt32(&gState.MainSendNum, 1)
 		atomic.AddInt64(&gState.MainSendSize, int64(msglen)+4)
 	}
@@ -359,7 +371,7 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 	ds := make([]byte, maxmsgsize)
 
 	index := int32(0)
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		msglen, err := conn.Read(ds)
 		if err != nil {
 			loggo.Info("recvFromSonny Read fail: %s %s", conn.Info(), err.Error())
@@ -385,15 +397,14 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 		}
 		index++
 		f.DataFrame.Index = index % MAX_INDEX
-
-		recvch.Write(f)
-
 		if loggo.IsDebug() {
 			loggo.Debug("recvFromSonny %s %d %s %d %p", conn.Info(), msglen, f.DataFrame.Crc, f.DataFrame.Index, f)
 		}
 
 		atomic.AddInt32(&gState.RecvNum, 1)
-		atomic.AddInt64(&gState.RecvSize, int64(len(f.DataFrame.Data)))
+		atomic.AddInt64(&gState.RecvSize, int64(msglen))
+
+		recvch.Write(f)
 	}
 	loggo.Info("recvFromSonny end %s", conn.Info())
 	return nil
@@ -402,7 +413,7 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		ff := <-sendch.Ch()
 		if ff == nil {
 			break
@@ -612,7 +623,7 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyConn, father *ProxyConn) error {
 	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
 
-	for !wg.IsExit() {
+	for !isExit(wg) {
 		ff := <-recvch.Ch()
 		if ff == nil {
 			break
