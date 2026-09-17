@@ -12,6 +12,6 @@
   "loglevel": "info",
   "nolog": 0,
   "noprint": 0,
-  "maxclient": 1024,
+  "maxclient": 10000,
   "maxconn": 10240
 }

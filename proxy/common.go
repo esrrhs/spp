@@ -54,27 +54,86 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MaxClient:                 1024,
+		MaxClient:                 10000,
 		MaxSonny:                  10240,
-		MainWriteChannelTimeoutMs: 100,
+		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
 	}
 }
 
 type ProxyConn struct {
 	conn        network.Conn
-	established bool
-	sendch      *common.Channel // *ProxyFrame (data frames)
-	recvch      *common.Channel // *ProxyFrame (data frames)
-	ctrlsendch  *common.Channel // *ProxyFrame (high-priority control frames: OPEN, OPENRSP, CLOSE, LOGIN, LOGINRSP)
-	ctrlrecvch  *common.Channel // *ProxyFrame (high-priority control frames: OPEN, OPENRSP, CLOSE, LOGIN, LOGINRSP)
+	established int32 // atomic bool
+	sendch      *msgChannel // *ProxyFrame (data frames)
+	recvch      *msgChannel // *ProxyFrame (data frames)
+	ctrlsendch  *msgChannel // *ProxyFrame (control frames + initial interactive DATA)
+	ctrlrecvch  *msgChannel // *ProxyFrame (high-priority control frames)
 	actived     int32
 	pinged      int32
 	sentBytes   int64
 	id          string
-	needclose   bool
+	needclose   int32 // atomic bool
 	mu          sync.RWMutex
 	isClosed    bool
+	closeOnce   sync.Once
+}
+
+func (p *ProxyConn) closeConn() {
+	p.closeOnce.Do(func() {
+		if p.conn != nil {
+			p.conn.Close()
+		}
+	})
+}
+
+func (p *ProxyConn) setEstablished(v bool) {
+	if v {
+		atomic.StoreInt32(&p.established, 1)
+	} else {
+		atomic.StoreInt32(&p.established, 0)
+	}
+}
+
+func (p *ProxyConn) isEstablished() bool {
+	return atomic.LoadInt32(&p.established) != 0
+}
+
+func (p *ProxyConn) setNeedClose() {
+	atomic.StoreInt32(&p.needclose, 1)
+}
+
+func (p *ProxyConn) isNeedClose() bool {
+	return atomic.LoadInt32(&p.needclose) != 0
+}
+
+// dialWithTimeout dials addr and aborts if it takes longer than timeoutSec.
+func dialWithTimeout(conn network.Conn, addr string, timeoutSec int) (network.Conn, error) {
+	if timeoutSec <= 0 {
+		timeoutSec = 10
+	}
+	type dialResult struct {
+		c   network.Conn
+		err error
+	}
+	ch := make(chan dialResult, 1)
+	go func() {
+		c, err := conn.Dial(addr)
+		ch <- dialResult{c, err}
+	}()
+	select {
+	case r := <-ch:
+		return r.c, r.err
+	case <-time.After(time.Duration(timeoutSec) * time.Second):
+		conn.Close()
+		// Drain late result to avoid leaking the dialed connection.
+		go func() {
+			r := <-ch
+			if r.c != nil {
+				r.c.Close()
+			}
+		}()
+		return nil, errors.New("dial timeout")
+	}
 }
 
 // CloseChannels safely closes all internal channels without racing with concurrent send/recv.
@@ -99,80 +158,81 @@ func (p *ProxyConn) CloseChannels() {
 	}
 }
 
-// SendFrame routes frames: control frames go to ctrlsendch (high priority) and data frames go to sendch.
-func (p *ProxyConn) SendFrame(f *ProxyFrame) {
+// pickSendCh selects the outbound channel under RLock, then returns it so the
+// caller can Write outside the ProxyConn lock (msgChannel serializes Close/Write).
+func (p *ProxyConn) pickSendCh(preferCtrl bool) *msgChannel {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.isClosed {
-		return
+		return nil
 	}
-	if p.ctrlsendch != nil && f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
-		p.ctrlsendch.Write(f)
-		return
+	if preferCtrl && p.ctrlsendch != nil {
+		return p.ctrlsendch
 	}
-	if p.sendch != nil {
-		p.sendch.Write(f)
+	return p.sendch
+}
+
+func (p *ProxyConn) pickRecvCh(preferCtrl bool) *msgChannel {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return nil
+	}
+	if preferCtrl && p.ctrlrecvch != nil {
+		return p.ctrlrecvch
+	}
+	return p.recvch
+}
+
+// SendFrame routes frames: control frames go to ctrlsendch (high priority) and data frames go to sendch.
+func (p *ProxyConn) SendFrame(f *ProxyFrame) {
+	preferCtrl := f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG
+	ch := p.pickSendCh(preferCtrl)
+	if ch != nil {
+		ch.Write(f)
 	}
 }
 
 // SendData sends data frames, routing initial interactive traffic to ctrlsendch and bulk traffic to sendch.
 func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
-		return
-	}
-	if isInteractive && p.ctrlsendch != nil {
-		p.ctrlsendch.Write(f)
-		return
-	}
-	if p.sendch != nil {
-		p.sendch.Write(f)
+	ch := p.pickSendCh(isInteractive)
+	if ch != nil {
+		ch.Write(f)
 	}
 }
 
 // RecvFrame routes received frames to ctrlrecvch or recvch in a thread-safe manner.
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
-		return
-	}
-	if p.ctrlrecvch != nil && f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
-		p.ctrlrecvch.Write(f)
-	} else if p.recvch != nil {
-		p.recvch.Write(f)
+	preferCtrl := f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG
+	ch := p.pickRecvCh(preferCtrl)
+	if ch != nil {
+		ch.Write(f)
 	}
 }
 
 // SendSonnyData safely writes a data frame to sonny's sendch with timeout.
 func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed || p.sendch == nil {
+	ch := p.pickSendCh(false)
+	if ch == nil {
 		return true
 	}
-	return p.sendch.WriteTimeout(f, timeoutMs)
+	return ch.WriteTimeout(f, timeoutMs)
 }
 
 // SendSonnyClose safely writes a close frame to sonny's sendch.
 func (p *ProxyConn) SendSonnyClose(f *ProxyFrame) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed || p.sendch == nil {
-		return
+	ch := p.pickSendCh(false)
+	if ch != nil {
+		ch.Write(f)
 	}
-	p.sendch.Write(f)
 }
 
 // RecvSonnyData safely writes an incoming frame from sonny's socket to sonny's recvch.
 func (p *ProxyConn) RecvSonnyData(f *ProxyFrame) {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed || p.recvch == nil {
-		return
+	ch := p.pickRecvCh(false)
+	if ch != nil {
+		ch.Write(f)
 	}
-	p.recvch.Write(f)
 }
 
 func checkProxyFame(f *ProxyFrame) error {
@@ -373,7 +433,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 	return nil
 }
 
-func sendTo(wg *thread.Group, sendch *common.Channel, ctrlsendch *common.Channel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
+func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
@@ -556,7 +616,7 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	return nil
 }
 
-func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, maxmsgsize int) error {
+func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
 	for !isExit(wg) {
@@ -620,7 +680,7 @@ func sendToSonny(wg *thread.Group, sendch *common.Channel, conn network.Conn, ma
 	return nil
 }
 
-func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, proxyconn *ProxyConn,
+func checkPingActive(wg *thread.Group, sendch *msgChannel, recvch *msgChannel, proxyconn *ProxyConn,
 	estimeout int, pinginter int, pingintertimeout int, showping bool, pingflag *int32) error {
 
 	loggo.Info("checkPingActive start %s", proxyconn.conn.Info())
@@ -636,7 +696,7 @@ func checkPingActive(wg *thread.Group, sendch *common.Channel, recvch *common.Ch
 
 	// 整体超时触发
 	case <-timeoutTimer.C:
-		if !proxyconn.established {
+		if !proxyconn.isEstablished() {
 			loggo.Info("checkPingActive established timeout %s", proxyconn.conn.Info())
 			return errors.New("established timeout")
 		}
@@ -693,7 +753,7 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 
 		// 2. 定时检查逻辑
 		case <-ticker.C:
-			if proxyconn.needclose {
+			if proxyconn.isNeedClose() {
 				loggo.Error("checkNeedClose needclose %s", proxyconn.conn.Info())
 				// 遇到错误通常直接返回，不需要走 exit 流程
 				return errors.New("needclose")
@@ -706,12 +766,12 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 	return nil
 }
 
-func processPing(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
+func processPing(f *ProxyFrame, sendch *msgChannel, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
 	atomic.AddInt32(pongflag, 1)
 	*pongtime = f.PingFrame.Time
 }
 
-func processPong(f *ProxyFrame, sendch *common.Channel, proxyconn *ProxyConn, showping bool) {
+func processPong(f *ProxyFrame, sendch *msgChannel, proxyconn *ProxyConn, showping bool) {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	atomic.StoreInt32(&proxyconn.pinged, 0)
 	if showping {
@@ -733,7 +793,7 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 
 	// 整体超时触发
 	case <-timeoutTimer.C:
-		if !proxyconn.established {
+		if !proxyconn.isEstablished() {
 			loggo.Error("checkSonnyActive established timeout %s", proxyconn.conn.Info())
 			return errors.New("established timeout")
 		}
@@ -766,7 +826,7 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 	return nil
 }
 
-func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyConn, father *ProxyConn) error {
+func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, father *ProxyConn) error {
 	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
 
 	for !isExit(wg) {

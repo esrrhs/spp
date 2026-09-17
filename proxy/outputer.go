@@ -5,7 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
@@ -66,12 +65,13 @@ func NewSSOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, confi
 }
 
 func (o *Outputer) Close() {
-	o.conn.Close()
 	o.sonny.Range(func(key, value interface{}) bool {
 		s := value.(*ProxyConn)
-		s.conn.Close()
+		s.setNeedClose()
+		s.closeConn()
 		return true
 	})
+	o.conn.Close()
 }
 
 func (o *Outputer) processDataFrame(f *ProxyFrame) {
@@ -83,7 +83,7 @@ func (o *Outputer) processDataFrame(f *ProxyFrame) {
 	}
 	sonny := v.(*ProxyConn)
 	if !sonny.SendSonnyData(f, o.config.MainWriteChannelTimeoutMs) {
-		sonny.needclose = true
+		sonny.setNeedClose()
 		loggo.Error("Outputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
 	atomic.AddInt32(&sonny.actived, 1)
@@ -130,7 +130,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 
 	var conn network.Conn
 	wg.Go("Outputer Dial"+" "+targetAddr, func() error {
-		cc, err := c.Dial(targetAddr)
+		cc, err := dialWithTimeout(c, targetAddr, o.config.ConnectTimeout)
 		if err != nil {
 			return err
 		}
@@ -189,7 +189,8 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 		return
 	}
 
-	proxyconn := &ProxyConn{id: id, conn: nil, established: true}
+	proxyconn := &ProxyConn{id: id, conn: nil}
+	proxyconn.setEstablished(true)
 	_, loaded := o.sonny.LoadOrStore(proxyconn.id, proxyconn)
 	if loaded {
 		rf.OpenRspFrame.Msg = "Conn id fail"
@@ -198,8 +199,8 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 		return
 	}
 
-	sendch := common.NewChannel(o.config.ConnBuffer)
-	recvch := common.NewChannel(o.config.ConnBuffer)
+	sendch := newMsgChannel(o.config.ConnBuffer)
+	recvch := newMsgChannel(o.config.ConnBuffer)
 
 	proxyconn.sendch = sendch
 	proxyconn.recvch = recvch
@@ -220,6 +221,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 
 	if !o.open(proxyConn, targetAddr) {
 		proxyConn.CloseChannels()
+		o.sonny.Delete(proxyConn.id)
 		return nil
 	}
 
@@ -227,7 +229,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 
 	wg := thread.NewGroup("Outputer processProxyConn"+" "+proxyConn.conn.Info(), o.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
-		proxyConn.conn.Close()
+		proxyConn.closeConn()
 		proxyConn.CloseChannels()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
 	})

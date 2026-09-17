@@ -84,12 +84,20 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 }
 
 func (i *Inputer) Close() {
-	i.listenconn.Close()
+	// Signal sonny to exit. Close TCP accepted conns here; UDP accepted conns are
+	// owned by the listener and closed inside listenconn.Close (avoid double Close).
 	i.sonny.Range(func(key, value interface{}) bool {
 		s := value.(*ProxyConn)
-		s.conn.Close()
+		s.setNeedClose()
+		if s.conn != nil && s.conn.Name() != "udp" {
+			s.closeConn()
+		}
 		return true
 	})
+	// Close listener asynchronously so UdpConn's internal Group.Stop is not nested
+	// inside an outer Group.exit callback (avoids gohome Group.isexit races).
+	listen := i.listenconn
+	go listen.Close()
 }
 
 func (i *Inputer) processDataFrame(f *ProxyFrame) {
@@ -101,7 +109,7 @@ func (i *Inputer) processDataFrame(f *ProxyFrame) {
 	}
 	sonny := v.(*ProxyConn)
 	if !sonny.SendSonnyData(f, i.config.MainWriteChannelTimeoutMs) {
-		sonny.needclose = true
+		sonny.setNeedClose()
 		loggo.Error("Inputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
 	atomic.AddInt32(&sonny.actived, 1)
@@ -129,10 +137,10 @@ func (i *Inputer) processOpenRspFrame(f *ProxyFrame) {
 	}
 	sonny := v.(*ProxyConn)
 	if f.OpenRspFrame.Ret {
-		sonny.established = true
+		sonny.setEstablished(true)
 		loggo.Info("Inputer processOpenRspFrame ok %s %s", id, sonny.conn.Info())
 	} else {
-		sonny.needclose = true
+		sonny.setNeedClose()
 		loggo.Info("Inputer processOpenRspFrame fail %s %s", id, sonny.conn.Info())
 	}
 }
@@ -201,7 +209,7 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
 	wg := thread.NewGroup("Inputer processSocks5Conn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
-		proxyConn.conn.Close()
+		proxyConn.closeConn()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
 	})
 
@@ -262,15 +270,18 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 		return nil
 	}
 
-	sendch := common.NewChannel(i.config.ConnBuffer)
-	recvch := common.NewChannel(i.config.ConnBuffer)
+	sendch := newMsgChannel(i.config.ConnBuffer)
+	recvch := newMsgChannel(i.config.ConnBuffer)
 
 	proxyConn.sendch = sendch
 	proxyConn.recvch = recvch
 
 	wg := thread.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
-		proxyConn.conn.Close()
+		// UDP sonny is closed by the listener; TCP sonny closed here / Inputer.Close.
+		if proxyConn.conn != nil && proxyConn.conn.Name() != "udp" {
+			proxyConn.closeConn()
+		}
 		proxyConn.CloseChannels()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
 	})
