@@ -85,6 +85,11 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 
 func (i *Inputer) Close() {
 	i.listenconn.Close()
+	i.sonny.Range(func(key, value interface{}) bool {
+		s := value.(*ProxyConn)
+		s.conn.Close()
+		return true
+	})
 }
 
 func (i *Inputer) processDataFrame(f *ProxyFrame) {
@@ -95,7 +100,7 @@ func (i *Inputer) processDataFrame(f *ProxyFrame) {
 		return
 	}
 	sonny := v.(*ProxyConn)
-	if !sonny.sendch.WriteTimeout(f, i.config.MainWriteChannelTimeoutMs) {
+	if !sonny.SendSonnyData(f, i.config.MainWriteChannelTimeoutMs) {
 		sonny.needclose = true
 		loggo.Error("Inputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
@@ -112,7 +117,7 @@ func (i *Inputer) processCloseFrame(f *ProxyFrame) {
 	}
 
 	sonny := v.(*ProxyConn)
-	sonny.sendch.Write(f)
+	sonny.SendSonnyClose(f)
 }
 
 func (i *Inputer) processOpenRspFrame(f *ProxyFrame) {
@@ -266,15 +271,14 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	wg := thread.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
 		proxyConn.conn.Close()
-		sendch.Close()
-		recvch.Close()
+		proxyConn.CloseChannels()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
 	})
 
 	i.openConn(proxyConn, targetAddr)
 
 	wg.Go("Inputer recvFromSonny"+" "+proxyConn.conn.Info(), func() error {
-		return recvFromSonny(wg, recvch, proxyConn.conn, i.config.MaxMsgSize)
+		return recvFromSonny(wg, proxyConn, proxyConn.conn, i.config.MaxMsgSize)
 	})
 
 	wg.Go("Inputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {
@@ -310,7 +314,7 @@ func (i *Inputer) openConn(proxyConn *ProxyConn, targetAddr string) {
 	f.OpenFrame.Id = proxyConn.id
 	f.OpenFrame.Toaddr = targetAddr
 
-	i.father.sendch.Write(f)
+	i.father.SendFrame(f)
 	loggo.Info("Inputer openConn %s %s", proxyConn.id, targetAddr)
 }
 

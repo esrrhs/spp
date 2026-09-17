@@ -9,6 +9,8 @@ import (
 	"net"
 	"testing"
 	"time"
+
+	"github.com/esrrhs/gohome/loggo"
 )
 
 func getFreePort(t *testing.T) int {
@@ -343,6 +345,125 @@ func TestE2E_AuthFailure(t *testing.T) {
 		conn.Close()
 		t.Fatalf("Client port %s should not accept connections when auth fails", clientAddr)
 	}
+}
+
+func TestE2E_ConcurrentDownloadAndWebBrowse(t *testing.T) {
+	loggo.Ini(loggo.Config{Level: loggo.LEVEL_INFO, Prefix: "test", NoLogFile: true})
+	defer loggo.Ini(loggo.Config{Level: loggo.LEVEL_DEBUG, Prefix: "test", NoLogFile: true})
+
+	echoAddr, stopEcho := startTCPEchoServer(t)
+	defer stopEcho()
+
+	serverPort := getFreePort(t)
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
+
+	clientPort := getFreePort(t)
+	clientAddr := fmt.Sprintf("127.0.0.1:%d", clientPort)
+
+	cfg := DefaultConfig()
+	cfg.Key = "test-concurrent-secret"
+
+	server, err := NewServer(cfg, []string{"tcp"}, []string{serverAddr})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	defer server.Close()
+
+	client, err := NewClient(cfg, "tcp", serverAddr, "concurrent_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	// Wait for tunnel to be established
+	tunnelConn, err := waitForPort(clientAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to connect to client: %v", err)
+	}
+	tunnelConn.Close()
+
+	// Start a simulated heavy bulk download connection in background
+	stopDownload := make(chan struct{})
+	downloadDone := make(chan struct{})
+
+	go func() {
+		defer close(downloadDone)
+		conn, err := net.Dial("tcp", clientAddr)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		chunk := make([]byte, 32*1024)
+		for i := range chunk {
+			chunk[i] = byte(i % 256)
+		}
+
+		// Read loop
+		go func() {
+			sink := make([]byte, 32*1024)
+			for {
+				_, err := conn.Read(sink)
+				if err != nil {
+					return
+				}
+			}
+		}()
+
+		// Write loop simulating heavy download
+		for {
+			select {
+			case <-stopDownload:
+				return
+			default:
+				_, err := conn.Write(chunk)
+				if err != nil {
+					return
+				}
+			}
+		}
+	}()
+
+	// Let the bulk download run and saturate the connection for 300ms
+	time.Sleep(300 * time.Millisecond)
+
+	// Concurrently simulate opening multiple quick web pages while heavy download is happening
+	for i := 0; i < 5; i++ {
+		start := time.Now()
+		webConn, err := net.DialTimeout("tcp", clientAddr, 2*time.Second)
+		if err != nil {
+			t.Fatalf("Web request %d connection failed: %v", i, err)
+		}
+
+		reqMsg := fmt.Sprintf("GET /page%d HTTP/1.1\r\nHost: example.com\r\n\r\n", i)
+		if _, err := webConn.Write([]byte(reqMsg)); err != nil {
+			webConn.Close()
+			t.Fatalf("Web request %d write failed: %v", i, err)
+		}
+
+		resp := make([]byte, len(reqMsg))
+		if _, err := io.ReadFull(webConn, resp); err != nil {
+			webConn.Close()
+			t.Fatalf("Web request %d read response failed: %v", i, err)
+		}
+
+		if string(resp) != reqMsg {
+			webConn.Close()
+			t.Fatalf("Web request %d response mismatch", i)
+		}
+		webConn.Close()
+
+		elapsed := time.Since(start)
+		t.Logf("Web request %d took %v", i, elapsed)
+		if elapsed > 1*time.Second {
+			t.Errorf("Web request %d took too long (%v), possible head-of-line blocking", i, elapsed)
+		}
+	}
+
+	// Stop background download
+	close(stopDownload)
+	<-downloadDone
+	time.Sleep(100 * time.Millisecond)
 }
 
 func init() {
