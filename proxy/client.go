@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/esrrhs/gohome/common"
@@ -27,6 +28,7 @@ type Client struct {
 	fromaddr   []string
 	toaddr     []string
 	serverconn []*ServerConn
+	connMu     sync.RWMutex
 	wg         *thread.Group
 }
 
@@ -112,15 +114,21 @@ func (c *Client) connect(index int, conn network.Conn) error {
 			break
 			// 2. 定时器触发逻辑
 		case <-checkTicker.C:
-			if c.serverconn[index] == nil {
+			c.connMu.RLock()
+			sconn := c.serverconn[index]
+			c.connMu.RUnlock()
+			if sconn == nil {
 				targetconn, err := conn.Dial(c.server)
 				if err != nil {
 					loggo.Error("connect Dial fail: %s %s", c.server, err.Error())
 					break
 				}
-				c.serverconn[index] = &ServerConn{ProxyConn: ProxyConn{conn: targetconn}}
+				newConn := &ServerConn{ProxyConn: ProxyConn{conn: targetconn}}
+				c.connMu.Lock()
+				c.serverconn[index] = newConn
+				c.connMu.Unlock()
 				c.wg.Go("Client useServer"+" "+targetconn.Info(), func() error {
-					return c.useServer(index, c.serverconn[index])
+					return c.useServer(index, newConn)
 				})
 			}
 		}
@@ -136,36 +144,39 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 
 	sendch := common.NewChannel(c.config.MainBuffer)
 	recvch := common.NewChannel(c.config.MainBuffer)
+	ctrlsendch := common.NewChannel(c.config.MainBuffer)
+	ctrlrecvch := common.NewChannel(c.config.MainBuffer)
 
 	serverconn.sendch = sendch
 	serverconn.recvch = recvch
+	serverconn.ctrlsendch = ctrlsendch
+	serverconn.ctrlrecvch = ctrlrecvch
 
 	wg := thread.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
 		loggo.Info("group start exit %s", serverconn.conn.Info())
-		serverconn.conn.Close()
-		sendch.Close()
-		recvch.Close()
 		if serverconn.output != nil {
 			serverconn.output.Close()
 		}
 		if serverconn.input != nil {
 			serverconn.input.Close()
 		}
+		serverconn.conn.Close()
+		serverconn.CloseChannels()
 		loggo.Info("group end exit %s", serverconn.conn.Info())
 	})
 
-	c.login(index, sendch)
+	c.login(index, serverconn)
 
 	var pingflag int32
 	var pongflag int32
 	var pongtime int64
 
 	wg.Go("Client recvFrom"+" "+serverconn.conn.Info(), func() error {
-		return recvFrom(wg, recvch, serverconn.conn, c.config.MaxMsgSize, c.config.Encrypt)
+		return recvFrom(wg, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize, c.config.Encrypt)
 	})
 
 	wg.Go("Client sendTo"+" "+serverconn.conn.Info(), func() error {
-		return sendTo(wg, sendch, serverconn.conn, c.config.Compress, c.config.MaxMsgSize, c.config.Encrypt, &pingflag, &pongflag, &pongtime)
+		return sendTo(wg, sendch, ctrlsendch, serverconn.conn, c.config.Compress, c.config.MaxMsgSize, c.config.Encrypt, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Client checkPingActive"+" "+serverconn.conn.Info(), func() error {
@@ -177,17 +188,19 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	})
 
 	wg.Go("Client process"+" "+serverconn.conn.Info(), func() error {
-		return c.process(wg, index, sendch, recvch, serverconn, &pongflag, &pongtime)
+		return c.process(wg, index, sendch, recvch, ctrlsendch, ctrlrecvch, serverconn, &pongflag, &pongtime)
 	})
 
 	wg.Wait()
+	c.connMu.Lock()
 	c.serverconn[index] = nil
+	c.connMu.Unlock()
 	loggo.Info("useServer close %s %s", c.server, serverconn.conn.Info())
 
 	return nil
 }
 
-func (c *Client) login(index int, sendch *common.Channel) {
+func (c *Client) login(index int, serverconn *ServerConn) {
 	f := &ProxyFrame{}
 	f.Type = FRAME_TYPE_LOGIN
 	f.LoginFrame = &LoginFrame{}
@@ -200,22 +213,61 @@ func (c *Client) login(index int, sendch *common.Channel) {
 	f.LoginFrame.Name = c.name + "_" + strconv.Itoa(index)
 	f.LoginFrame.Key = c.config.Key
 
-	sendch.Write(f)
+	serverconn.SendFrame(f)
 
 	loggo.Info("start login %d %s %s", index, c.server, f.LoginFrame.String())
 }
 
-func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, recvch *common.Channel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
+func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, recvch *common.Channel, ctrlsendch *common.Channel, ctrlrecvch *common.Channel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", serverconn.conn.Info())
 
 	for !isExit(wg) {
+		var f *ProxyFrame
+		exit := false
 
-		ff := <-recvch.Ch()
-		if ff == nil {
+		// 1. Strict priority check on control frames
+		select {
+		case ff := <-ctrlrecvch.Ch():
+			if ff == nil {
+				exit = true
+			} else {
+				f = ff.(*ProxyFrame)
+			}
+		default:
+		}
+
+		// 2. If no control frame was ready, wait on either (ctrl prioritized)
+		if f == nil && !exit {
+			select {
+			case ff := <-ctrlrecvch.Ch():
+				if ff == nil {
+					exit = true
+					break
+				}
+				f = ff.(*ProxyFrame)
+			default:
+				select {
+				case ff := <-ctrlrecvch.Ch():
+					if ff == nil {
+						exit = true
+						break
+					}
+					f = ff.(*ProxyFrame)
+				case ff := <-recvch.Ch():
+					if ff == nil {
+						exit = true
+						break
+					}
+					f = ff.(*ProxyFrame)
+				}
+			}
+		}
+
+		if exit || f == nil {
 			break
 		}
-		f := ff.(*ProxyFrame)
+
 		switch f.Type {
 		case FRAME_TYPE_LOGINRSP:
 			c.processLoginRsp(wg, index, f, sendch, serverconn)

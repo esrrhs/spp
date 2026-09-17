@@ -6,6 +6,7 @@ import (
 	"io"
 	"runtime"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,7 +43,7 @@ func DefaultConfig() *Config {
 		MaxMsgSize:                1024 * 1024,
 		MainBuffer:                64,
 		ConnBuffer:                16,
-		EstablishedTimeout:        10,
+		EstablishedTimeout:        30,
 		PingInter:                 1,
 		PingTimeoutInter:          30,
 		ConnTimeout:               60,
@@ -55,7 +56,7 @@ func DefaultConfig() *Config {
 		Password:                  "",
 		MaxClient:                 1024,
 		MaxSonny:                  10240,
-		MainWriteChannelTimeoutMs: 1000,
+		MainWriteChannelTimeoutMs: 100,
 		Congestion:                "bb",
 	}
 }
@@ -63,12 +64,115 @@ func DefaultConfig() *Config {
 type ProxyConn struct {
 	conn        network.Conn
 	established bool
-	sendch      *common.Channel // *ProxyFrame
-	recvch      *common.Channel // *ProxyFrame
+	sendch      *common.Channel // *ProxyFrame (data frames)
+	recvch      *common.Channel // *ProxyFrame (data frames)
+	ctrlsendch  *common.Channel // *ProxyFrame (high-priority control frames: OPEN, OPENRSP, CLOSE, LOGIN, LOGINRSP)
+	ctrlrecvch  *common.Channel // *ProxyFrame (high-priority control frames: OPEN, OPENRSP, CLOSE, LOGIN, LOGINRSP)
 	actived     int32
 	pinged      int32
+	sentBytes   int64
 	id          string
 	needclose   bool
+	mu          sync.RWMutex
+	isClosed    bool
+}
+
+// CloseChannels safely closes all internal channels without racing with concurrent send/recv.
+func (p *ProxyConn) CloseChannels() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.isClosed {
+		return
+	}
+	p.isClosed = true
+	if p.sendch != nil {
+		p.sendch.Close()
+	}
+	if p.recvch != nil {
+		p.recvch.Close()
+	}
+	if p.ctrlsendch != nil {
+		p.ctrlsendch.Close()
+	}
+	if p.ctrlrecvch != nil {
+		p.ctrlrecvch.Close()
+	}
+}
+
+// SendFrame routes frames: control frames go to ctrlsendch (high priority) and data frames go to sendch.
+func (p *ProxyConn) SendFrame(f *ProxyFrame) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return
+	}
+	if p.ctrlsendch != nil && f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
+		p.ctrlsendch.Write(f)
+		return
+	}
+	if p.sendch != nil {
+		p.sendch.Write(f)
+	}
+}
+
+// SendData sends data frames, routing initial interactive traffic to ctrlsendch and bulk traffic to sendch.
+func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return
+	}
+	if isInteractive && p.ctrlsendch != nil {
+		p.ctrlsendch.Write(f)
+		return
+	}
+	if p.sendch != nil {
+		p.sendch.Write(f)
+	}
+}
+
+// RecvFrame routes received frames to ctrlrecvch or recvch in a thread-safe manner.
+func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return
+	}
+	if p.ctrlrecvch != nil && f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
+		p.ctrlrecvch.Write(f)
+	} else if p.recvch != nil {
+		p.recvch.Write(f)
+	}
+}
+
+// SendSonnyData safely writes a data frame to sonny's sendch with timeout.
+func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed || p.sendch == nil {
+		return true
+	}
+	return p.sendch.WriteTimeout(f, timeoutMs)
+}
+
+// SendSonnyClose safely writes a close frame to sonny's sendch.
+func (p *ProxyConn) SendSonnyClose(f *ProxyFrame) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed || p.sendch == nil {
+		return
+	}
+	p.sendch.Write(f)
+}
+
+// RecvSonnyData safely writes an incoming frame from sonny's socket to sonny's recvch.
+func (p *ProxyConn) RecvSonnyData(f *ProxyFrame) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed || p.recvch == nil {
+		return
+	}
+	p.recvch.Write(f)
 }
 
 func checkProxyFame(f *ProxyFrame) error {
@@ -205,7 +309,7 @@ const (
 	MAX_PROTO_PACK_SIZE = 100
 )
 
-func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxmsgsize int, encrypt string) error {
+func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int, encrypt string) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.RecvThread, -1)
@@ -258,7 +362,8 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start Write %s", conn.Info())
 		}
-		recvch.Write(f)
+
+		proxyconn.RecvFrame(f)
 
 		atomic.AddInt32(&gState.MainRecvNum, 1)
 		atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
@@ -268,13 +373,18 @@ func recvFrom(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxms
 	return nil
 }
 
-func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
+func sendTo(wg *thread.Group, sendch *common.Channel, ctrlsendch *common.Channel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
 
 	loggo.Info("sendTo start %s", conn.Info())
 	bs := make([]byte, 4)
+
+	var ctrlCh <-chan any
+	if ctrlsendch != nil {
+		ctrlCh = ctrlsendch.Ch()
+	}
 
 	for !isExit(wg) {
 		var f *ProxyFrame
@@ -292,16 +402,46 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 			f.PongFrame.Time = *pongtime
 		} else {
 			exit := false
+			// 1. Strict priority check: send control frame first if any is ready
 			select {
-			case ff := <-sendch.Ch():
+			case ff := <-ctrlCh:
 				if ff == nil {
 					exit = true
-					break
+				} else {
+					f = ff.(*ProxyFrame)
 				}
-				f = ff.(*ProxyFrame)
-			case <-time.After(time.Second):
-				break
+			default:
 			}
+
+			// 2. If no control frame was ready, wait on either (ctrl prioritized)
+			if f == nil && !exit {
+				select {
+				case ff := <-ctrlCh:
+					if ff == nil {
+						exit = true
+						break
+					}
+					f = ff.(*ProxyFrame)
+				default:
+					select {
+					case ff := <-ctrlCh:
+						if ff == nil {
+							exit = true
+							break
+						}
+						f = ff.(*ProxyFrame)
+					case ff := <-sendch.Ch():
+						if ff == nil {
+							exit = true
+							break
+						}
+						f = ff.(*ProxyFrame)
+					case <-time.After(time.Second):
+						break
+					}
+				}
+			}
+
 			if f == nil {
 				if exit {
 					break
@@ -363,12 +503,18 @@ func sendTo(wg *thread.Group, sendch *common.Channel, conn network.Conn, compres
 }
 
 const (
-	MAX_INDEX = 1024
+	MAX_INDEX               = 1024
+	MAX_CHUNK_SIZE          = 32 * 1024  // Chunk frames to 32KB to allow fair interleaving and prevent head-of-line blocking
+	INTERACTIVE_BYTES_LIMIT = 256 * 1024 // Initial data bytes of a connection sent via high-priority queue to prevent head-of-line blocking
 )
 
-func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, maxmsgsize int) error {
+func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("recvFromSonny start %s", conn.Info())
-	ds := make([]byte, maxmsgsize)
+	bufSize := maxmsgsize
+	if bufSize > MAX_CHUNK_SIZE {
+		bufSize = MAX_CHUNK_SIZE
+	}
+	ds := make([]byte, bufSize)
 
 	index := int32(0)
 	for !isExit(wg) {
@@ -404,7 +550,7 @@ func recvFromSonny(wg *thread.Group, recvch *common.Channel, conn network.Conn, 
 		atomic.AddInt32(&gState.RecvNum, 1)
 		atomic.AddInt64(&gState.RecvSize, int64(msglen))
 
-		recvch.Write(f)
+		proxyconn.RecvSonnyData(f)
 	}
 	loggo.Info("recvFromSonny end %s", conn.Info())
 	return nil
@@ -646,9 +792,12 @@ func copySonnyRecv(wg *thread.Group, recvch *common.Channel, proxyConn *ProxyCon
 		f.DataFrame.Id = proxyConn.id
 		atomic.AddInt32(&proxyConn.actived, 1)
 
-		father.sendch.Write(f)
+		dataLen := len(f.DataFrame.Data)
+		dataCrc := f.DataFrame.Crc
+		curSent := atomic.AddInt64(&proxyConn.sentBytes, int64(dataLen))
+		father.SendData(f, curSent <= INTERACTIVE_BYTES_LIMIT)
 
-		loggo.Debug("copySonnyRecv %s %d %s %p", proxyConn.id, len(f.DataFrame.Data), f.DataFrame.Crc, f)
+		loggo.Debug("copySonnyRecv %s %d %s %p", proxyConn.id, dataLen, dataCrc, f)
 	}
 	loggo.Info("copySonnyRecv end %s", proxyConn.conn.Info())
 	return nil
@@ -660,7 +809,7 @@ func closeRemoteConn(proxyConn *ProxyConn, father *ProxyConn) {
 	f.CloseFrame = &CloseFrame{}
 	f.CloseFrame.Id = proxyConn.id
 
-	father.sendch.Write(f)
+	father.SendFrame(f)
 	loggo.Info("closeConn %s", proxyConn.id)
 }
 

@@ -67,6 +67,11 @@ func NewSSOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, confi
 
 func (o *Outputer) Close() {
 	o.conn.Close()
+	o.sonny.Range(func(key, value interface{}) bool {
+		s := value.(*ProxyConn)
+		s.conn.Close()
+		return true
+	})
 }
 
 func (o *Outputer) processDataFrame(f *ProxyFrame) {
@@ -77,7 +82,7 @@ func (o *Outputer) processDataFrame(f *ProxyFrame) {
 		return
 	}
 	sonny := v.(*ProxyConn)
-	if !sonny.sendch.WriteTimeout(f, o.config.MainWriteChannelTimeoutMs) {
+	if !sonny.SendSonnyData(f, o.config.MainWriteChannelTimeoutMs) {
 		sonny.needclose = true
 		loggo.Error("Outputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 	}
@@ -94,7 +99,7 @@ func (o *Outputer) processCloseFrame(f *ProxyFrame) {
 	}
 
 	sonny := v.(*ProxyConn)
-	sonny.sendch.Write(f)
+	sonny.SendSonnyClose(f)
 }
 
 func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
@@ -112,7 +117,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 	if err != nil {
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "NewConn fail " + targetAddr
-		o.father.sendch.Write(rf)
+		o.father.SendFrame(rf)
 		loggo.Error("Outputer open NewConn fail %s %s", targetAddr, err.Error())
 		return false
 	}
@@ -137,7 +142,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 	if err != nil {
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "Dial fail " + targetAddr
-		o.father.sendch.Write(rf)
+		o.father.SendFrame(rf)
 		loggo.Error("Outputer open Dial fail %s %s", targetAddr, err.Error())
 		return false
 	}
@@ -148,7 +153,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 
 	rf.OpenRspFrame.Ret = true
 	rf.OpenRspFrame.Msg = "ok"
-	o.father.sendch.Write(rf)
+	o.father.SendFrame(rf)
 
 	return true
 }
@@ -169,7 +174,7 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 		ss_local_port := os.Getenv("SS_LOCAL_PORT")
 		if len(ss_local_host) <= 0 || len(ss_local_port) <= 0 {
 			rf.OpenRspFrame.Msg = "ss no env"
-			o.father.sendch.Write(rf)
+			o.father.SendFrame(rf)
 			loggo.Info("Outputer ss no env %s %s", ss_local_host, ss_local_port)
 			return
 		}
@@ -179,7 +184,7 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	size := o.sonnySize()
 	if size >= o.config.MaxSonny {
 		rf.OpenRspFrame.Msg = "max sonny"
-		o.father.sendch.Write(rf)
+		o.father.SendFrame(rf)
 		loggo.Info("Outputer listen max sonny %s %d", id, size)
 		return
 	}
@@ -188,7 +193,7 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	_, loaded := o.sonny.LoadOrStore(proxyconn.id, proxyconn)
 	if loaded {
 		rf.OpenRspFrame.Msg = "Conn id fail"
-		o.father.sendch.Write(rf)
+		o.father.SendFrame(rf)
 		loggo.Error("Outputer processOpenFrame LoadOrStore fail %s %s", targetAddr, id)
 		return
 	}
@@ -214,8 +219,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 	recvch := proxyConn.recvch
 
 	if !o.open(proxyConn, targetAddr) {
-		sendch.Close()
-		recvch.Close()
+		proxyConn.CloseChannels()
 		return nil
 	}
 
@@ -224,13 +228,12 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 	wg := thread.NewGroup("Outputer processProxyConn"+" "+proxyConn.conn.Info(), o.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
 		proxyConn.conn.Close()
-		sendch.Close()
-		recvch.Close()
+		proxyConn.CloseChannels()
 		loggo.Info("group end exit %s", proxyConn.conn.Info())
 	})
 
 	wg.Go("Outputer recvFromSonny"+" "+proxyConn.conn.Info(), func() error {
-		return recvFromSonny(wg, recvch, proxyConn.conn, o.config.MaxMsgSize)
+		return recvFromSonny(wg, proxyConn, proxyConn.conn, o.config.MaxMsgSize)
 	})
 
 	wg.Go("Outputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {

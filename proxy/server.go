@@ -130,21 +130,24 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 
 	sendch := common.NewChannel(s.config.MainBuffer)
 	recvch := common.NewChannel(s.config.MainBuffer)
+	ctrlsendch := common.NewChannel(s.config.MainBuffer)
+	ctrlrecvch := common.NewChannel(s.config.MainBuffer)
 
 	clientconn.sendch = sendch
 	clientconn.recvch = recvch
+	clientconn.ctrlsendch = ctrlsendch
+	clientconn.ctrlrecvch = ctrlrecvch
 
 	wg := thread.NewGroup("Server serveClient"+" "+clientconn.conn.Info(), s.wg, func() {
 		loggo.Info("group start exit %s", clientconn.conn.Info())
-		clientconn.conn.Close()
-		sendch.Close()
-		recvch.Close()
 		if clientconn.input != nil {
 			clientconn.input.Close()
 		}
 		if clientconn.output != nil {
 			clientconn.output.Close()
 		}
+		clientconn.conn.Close()
+		clientconn.CloseChannels()
 		loggo.Info("group end exit %s", clientconn.conn.Info())
 	})
 
@@ -153,11 +156,11 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	var pongtime int64
 
 	wg.Go("Server recvFrom"+" "+clientconn.conn.Info(), func() error {
-		return recvFrom(wg, recvch, clientconn.conn, s.config.MaxMsgSize, s.config.Encrypt)
+		return recvFrom(wg, &clientconn.ProxyConn, clientconn.conn, s.config.MaxMsgSize, s.config.Encrypt)
 	})
 
 	wg.Go("Server sendTo"+" "+clientconn.conn.Info(), func() error {
-		return sendTo(wg, sendch, clientconn.conn, s.config.Compress, s.config.MaxMsgSize, s.config.Encrypt, &pingflag, &pongflag, &pongtime)
+		return sendTo(wg, sendch, ctrlsendch, clientconn.conn, s.config.Compress, s.config.MaxMsgSize, s.config.Encrypt, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Server checkPingActive"+" "+clientconn.conn.Info(), func() error {
@@ -169,7 +172,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	})
 
 	wg.Go("Server process"+" "+clientconn.conn.Info(), func() error {
-		return s.process(wg, sendch, recvch, clientconn, &pongflag, &pongtime)
+		return s.process(wg, sendch, recvch, ctrlsendch, ctrlrecvch, clientconn, &pongflag, &pongtime)
 	})
 
 	wg.Wait()
@@ -182,19 +185,59 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	return nil
 }
 
-func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
+func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, ctrlsendch *common.Channel, ctrlrecvch *common.Channel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", clientconn.conn.Info())
 
 	for !isExit(wg) {
-		ff := <-recvch.Ch()
-		if ff == nil {
+		var f *ProxyFrame
+		exit := false
+
+		// 1. Strict priority check on control frames
+		select {
+		case ff := <-ctrlrecvch.Ch():
+			if ff == nil {
+				exit = true
+			} else {
+				f = ff.(*ProxyFrame)
+			}
+		default:
+		}
+
+		// 2. If no control frame was ready, wait on either (ctrl prioritized)
+		if f == nil && !exit {
+			select {
+			case ff := <-ctrlrecvch.Ch():
+				if ff == nil {
+					exit = true
+					break
+				}
+				f = ff.(*ProxyFrame)
+			default:
+				select {
+				case ff := <-ctrlrecvch.Ch():
+					if ff == nil {
+						exit = true
+						break
+					}
+					f = ff.(*ProxyFrame)
+				case ff := <-recvch.Ch():
+					if ff == nil {
+						exit = true
+						break
+					}
+					f = ff.(*ProxyFrame)
+				}
+			}
+		}
+
+		if exit || f == nil {
 			break
 		}
-		f := ff.(*ProxyFrame)
+
 		switch f.Type {
 		case FRAME_TYPE_LOGIN:
-			s.processLogin(wg, f, sendch, clientconn)
+			s.processLogin(wg, f, clientconn)
 
 		case FRAME_TYPE_PING:
 			processPing(f, sendch, &clientconn.ProxyConn, pongflag, pongtime)
@@ -219,7 +262,7 @@ func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *commo
 	return nil
 }
 
-func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Channel, clientconn *ClientConn) {
+func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *ClientConn) {
 	loggo.Info("processLogin from %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 
 	clientconn.proxyproto = f.LoginFrame.Proxyproto
@@ -235,7 +278,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Ch
 	if f.LoginFrame.Key != s.config.Key {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "key error"
-		sendch.Write(rf)
+		clientconn.SendFrame(rf)
 		loggo.Error("processLogin fail key error %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 		return
 	}
@@ -243,7 +286,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Ch
 	if clientconn.established {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "has established before"
-		sendch.Write(rf)
+		clientconn.SendFrame(rf)
 		loggo.Error("processLogin fail has established before %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 		return
 	}
@@ -252,7 +295,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Ch
 	if loaded {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = f.LoginFrame.Name + " has login before"
-		sendch.Write(rf)
+		clientconn.SendFrame(rf)
 		loggo.Error("processLogin fail %s has login before %s %s", f.LoginFrame.Name, clientconn.conn.Info(), f.LoginFrame.String())
 		return
 	}
@@ -262,7 +305,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Ch
 		s.clients.Delete(clientconn.name)
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "iniService fail"
-		sendch.Write(rf)
+		clientconn.SendFrame(rf)
 		loggo.Error("processLogin iniService fail %s %s %s", clientconn.conn.Info(), f.LoginFrame.String(), err)
 		return
 	}
@@ -271,7 +314,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, sendch *common.Ch
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
-	sendch.Write(rf)
+	clientconn.SendFrame(rf)
 
 	loggo.Info("processLogin ok %s %s", clientconn.conn.Info(), f.LoginFrame.String())
 }
