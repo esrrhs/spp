@@ -91,7 +91,7 @@ type ConfigFile struct {
 	FromAddr    []string `json:"fromaddr"`
 	ToAddr      []string `json:"toaddr"`
 	Key         string   `json:"key"`
-	Encrypt     string   `json:"encrypt"`
+	Encrypt     *string  `json:"encrypt"`
 	Compress    *int     `json:"compress"`
 	NoLog       *int     `json:"nolog"`
 	NoPrint     *int     `json:"noprint"`
@@ -146,7 +146,7 @@ func main() {
 	ping := flag.Bool("ping", false, "show ping")
 	username := flag.String("username", "", "socks5 username")
 	password := flag.String("password", "", "socks5 password")
-	maxclient := flag.Int("maxclient", 1024, "max client connection")
+	maxclient := flag.Int("maxclient", 10000, "max client connection")
 	maxconn := flag.Int("maxconn", 10240, "max connection")
 
 	flag.Parse()
@@ -197,8 +197,8 @@ func main() {
 		if !cliSet["key"] && fileCfg.Key != "" {
 			*key = fileCfg.Key
 		}
-		if !cliSet["encrypt"] && fileCfg.Encrypt != "" {
-			*encrypt = fileCfg.Encrypt
+		if !cliSet["encrypt"] && fileCfg.Encrypt != nil {
+			*encrypt = *fileCfg.Encrypt
 		}
 		if !cliSet["compress"] && fileCfg.Compress != nil {
 			*compress = *fileCfg.Compress

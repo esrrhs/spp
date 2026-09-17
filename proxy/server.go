@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
@@ -128,10 +127,10 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 
 	loggo.Info("serveClient accept new client %s", clientconn.conn.Info())
 
-	sendch := common.NewChannel(s.config.MainBuffer)
-	recvch := common.NewChannel(s.config.MainBuffer)
-	ctrlsendch := common.NewChannel(s.config.MainBuffer)
-	ctrlrecvch := common.NewChannel(s.config.MainBuffer)
+	sendch := newMsgChannel(s.config.MainBuffer)
+	recvch := newMsgChannel(s.config.MainBuffer)
+	ctrlsendch := newMsgChannel(s.config.MainBuffer)
+	ctrlrecvch := newMsgChannel(s.config.MainBuffer)
 
 	clientconn.sendch = sendch
 	clientconn.recvch = recvch
@@ -176,7 +175,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	})
 
 	wg.Wait()
-	if clientconn.established {
+	if clientconn.isEstablished() {
 		s.clients.Delete(clientconn.name)
 	}
 
@@ -185,7 +184,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	return nil
 }
 
-func (s *Server) process(wg *thread.Group, sendch *common.Channel, recvch *common.Channel, ctrlsendch *common.Channel, ctrlrecvch *common.Channel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
+func (s *Server) process(wg *thread.Group, sendch *msgChannel, recvch *msgChannel, ctrlsendch *msgChannel, ctrlrecvch *msgChannel, clientconn *ClientConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", clientconn.conn.Info())
 
@@ -283,7 +282,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 		return
 	}
 
-	if clientconn.established {
+	if clientconn.isEstablished() {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "has established before"
 		clientconn.SendFrame(rf)
@@ -310,7 +309,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 		return
 	}
 
-	clientconn.established = true
+	clientconn.setEstablished(true)
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"

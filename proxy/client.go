@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
@@ -22,6 +21,7 @@ type ServerConn struct {
 type Client struct {
 	config     *Config
 	server     string
+	serverproto string
 	name       string
 	clienttype CLIENT_TYPE
 	proxyproto []PROXY_PROTO
@@ -42,8 +42,8 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 	if cn == nil {
 		return nil, err
 	}
-
 	setCongestion(cn, config)
+	cn.Close()
 
 	clienttypestr = strings.ToUpper(clienttypestr)
 	clienttype, ok := CLIENT_TYPE_value[clienttypestr]
@@ -63,15 +63,16 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 	wg := thread.NewGroup("Client"+" "+clienttypestr, nil, nil)
 
 	c := &Client{
-		config:     config,
-		server:     server,
-		name:       name,
-		clienttype: CLIENT_TYPE(clienttype),
-		proxyproto: proxyproto,
-		fromaddr:   fromaddr,
-		toaddr:     toaddr,
-		serverconn: make([]*ServerConn, len(proxyprotostr)),
-		wg:         wg,
+		config:      config,
+		server:      server,
+		serverproto: serverproto,
+		name:        name,
+		clienttype:  CLIENT_TYPE(clienttype),
+		proxyproto:  proxyproto,
+		fromaddr:    fromaddr,
+		toaddr:      toaddr,
+		serverconn:  make([]*ServerConn, len(proxyprotostr)),
+		wg:          wg,
 	}
 
 	wg.Go("Client state"+" "+clienttypestr, func() error {
@@ -85,7 +86,7 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 			toaddrstr = toaddr[i]
 		}
 		wg.Go("Client connect"+" "+fromaddr[i]+" "+toaddrstr, func() error {
-			return c.connect(index, cn)
+			return c.connect(index)
 		})
 	}
 
@@ -97,7 +98,7 @@ func (c *Client) Close() {
 	c.wg.Wait()
 }
 
-func (c *Client) connect(index int, conn network.Conn) error {
+func (c *Client) connect(index int) error {
 	loggo.Info("connect start %d %s", index, c.server)
 
 	// 创建一个定时器
@@ -118,8 +119,15 @@ func (c *Client) connect(index int, conn network.Conn) error {
 			sconn := c.serverconn[index]
 			c.connMu.RUnlock()
 			if sconn == nil {
-				targetconn, err := conn.Dial(c.server)
+				dialer, err := network.NewConn(c.serverproto)
+				if dialer == nil {
+					loggo.Error("connect NewConn fail: %s %v", c.server, err)
+					break
+				}
+				setCongestion(dialer, c.config)
+				targetconn, err := dialWithTimeout(dialer, c.server, c.config.ConnectTimeout)
 				if err != nil {
+					dialer.Close()
 					loggo.Error("connect Dial fail: %s %s", c.server, err.Error())
 					break
 				}
@@ -142,10 +150,10 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 
 	loggo.Info("useServer %s", serverconn.conn.Info())
 
-	sendch := common.NewChannel(c.config.MainBuffer)
-	recvch := common.NewChannel(c.config.MainBuffer)
-	ctrlsendch := common.NewChannel(c.config.MainBuffer)
-	ctrlrecvch := common.NewChannel(c.config.MainBuffer)
+	sendch := newMsgChannel(c.config.MainBuffer)
+	recvch := newMsgChannel(c.config.MainBuffer)
+	ctrlsendch := newMsgChannel(c.config.MainBuffer)
+	ctrlrecvch := newMsgChannel(c.config.MainBuffer)
 
 	serverconn.sendch = sendch
 	serverconn.recvch = recvch
@@ -218,7 +226,7 @@ func (c *Client) login(index int, serverconn *ServerConn) {
 	loggo.Info("start login %d %s %s", index, c.server, f.LoginFrame.String())
 }
 
-func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, recvch *common.Channel, ctrlsendch *common.Channel, ctrlrecvch *common.Channel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
+func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch *msgChannel, ctrlsendch *msgChannel, ctrlrecvch *msgChannel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", serverconn.conn.Info())
 
@@ -295,9 +303,9 @@ func (c *Client) process(wg *thread.Group, index int, sendch *common.Channel, re
 	return nil
 }
 
-func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sendch *common.Channel, serverconn *ServerConn) {
+func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sendch *msgChannel, serverconn *ServerConn) {
 	if !f.LoginRspFrame.Ret {
-		serverconn.needclose = true
+		serverconn.setNeedClose()
 		loggo.Error("processLoginRsp fail %s %s", c.server, f.LoginRspFrame.Msg)
 		return
 	}
@@ -306,12 +314,12 @@ func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sen
 
 	err := c.iniService(wg, index, serverconn)
 	if err != nil {
-		serverconn.needclose = true
+		serverconn.setNeedClose()
 		loggo.Error("processLoginRsp iniService fail %s %s", c.server, err)
 		return
 	}
 
-	serverconn.established = true
+	serverconn.setEstablished(true)
 }
 
 func (c *Client) iniService(wg *thread.Group, index int, serverConn *ServerConn) error {
