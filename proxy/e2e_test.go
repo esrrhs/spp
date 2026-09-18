@@ -9,8 +9,6 @@ import (
 	"net"
 	"testing"
 	"time"
-
-	"github.com/esrrhs/gohome/loggo"
 )
 
 func getFreePort(t *testing.T) int {
@@ -348,9 +346,6 @@ func TestE2E_AuthFailure(t *testing.T) {
 }
 
 func TestE2E_ConcurrentDownloadAndWebBrowse(t *testing.T) {
-	loggo.Ini(loggo.Config{Level: loggo.LEVEL_INFO, Prefix: "test", NoLogFile: true})
-	defer loggo.Ini(loggo.Config{Level: loggo.LEVEL_DEBUG, Prefix: "test", NoLogFile: true})
-
 	echoAddr, stopEcho := startTCPEchoServer(t)
 	defer stopEcho()
 

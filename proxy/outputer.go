@@ -140,6 +140,9 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
 
 	err = wg.Wait()
 	if err != nil {
+		if conn != nil {
+			conn.Close()
+		}
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "Dial fail " + targetAddr
 		o.father.SendFrame(rf)
