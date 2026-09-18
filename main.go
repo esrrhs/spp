@@ -138,8 +138,8 @@ func main() {
 	flag.Var(&fromaddr, "fromaddr", "from addr")
 	var toaddr toFlags
 	flag.Var(&toaddr, "toaddr", "to addr")
-	key := flag.String("key", "123456", "verify key")
-	encrypt := flag.String("encrypt", "default", "encrypt key, empty means off")
+	key := flag.String("key", "", "auth key (required)")
+	encrypt := flag.String("encrypt", "", "encrypt key, empty means encryption off")
 	encrypttype := flag.String("encrypttype", "chacha20", "encrypt type: none/aes-gcm/chacha20")
 	compress := flag.Int("compress", 128, "start compress size, 0 means off")
 	compresstype := flag.String("compresstype", "zstd", "compress type: none/zlib/zstd")
@@ -370,6 +370,13 @@ func main() {
 	}
 	if et == proxy.EncryptUnspecified {
 		config.EncryptType = proxy.EncryptChaCha20
+	}
+	if err := proxy.ValidateConfig(config); err != nil {
+		loggo.Error("%s", err.Error())
+		return
+	}
+	if config.Encrypt == "" {
+		loggo.Info("encryption disabled (-encrypt empty)")
 	}
 
 	var s *proxy.Server

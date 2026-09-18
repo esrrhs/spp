@@ -193,8 +193,8 @@ Save as `config_server.json`:
   "type": "server",
   "proto": ["tcp"],
   "listen": [":8888"],
-  "key": "123456",
-  "encrypt": "default",
+  "key": "replace-with-auth-key",
+  "encrypt": "replace-with-encrypt-key",
   "compress": 128,
   "loglevel": "info"
 }
@@ -218,8 +218,8 @@ Save as `config_client.json`:
   "proxyproto": ["tcp"],
   "fromaddr": [":8080"],
   "toaddr": [":8080"],
-  "key": "123456",
-  "encrypt": "default",
+  "key": "replace-with-auth-key",
+  "encrypt": "replace-with-encrypt-key",
   "compress": 128,
   "loglevel": "info"
 }
@@ -253,9 +253,11 @@ Usage of spp:
   -toaddr value
         Destination target address
   -key string
-        Authentication key (default "123456")
+        Authentication key (required; no default)
   -encrypt string
-        Encryption password (default "default", empty disables)
+        Encryption key (empty disables encryption; no default)
+  -encrypttype string
+        Encryption type: none/aes-gcm/chacha20 (default "chacha20")
   -compress int
         Minimum payload size in bytes to compress (default 128, 0 disables)
   -loglevel string

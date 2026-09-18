@@ -6,8 +6,8 @@
   "listen": [
     ":8888"
   ],
-  "key": "123456",
-  "encrypt": "default",
+  "key": "replace-with-auth-key",
+  "encrypt": "replace-with-encrypt-key",
   "encrypttype": "chacha20",
   "compress": 128,
   "compresstype": "zstd",

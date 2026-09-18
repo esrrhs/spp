@@ -14,8 +14,8 @@
   "toaddr": [
     ":8080"
   ],
-  "key": "123456",
-  "encrypt": "default",
+  "key": "replace-with-auth-key",
+  "encrypt": "replace-with-encrypt-key",
   "compress": 128,
   "loglevel": "info",
   "nolog": 0,

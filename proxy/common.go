@@ -7,6 +7,7 @@ import (
 	"io"
 	"runtime"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,8 +27,8 @@ type Config struct {
 	PingTimeoutInter          int          // 主通道ping超时间隔
 	ConnTimeout               int          // 每个conn的不活跃超时时间
 	ConnectTimeout            int          // 每个conn的连接超时
-	Key                       string       // 连接密码
-	Encrypt                   string       // 加密密钥，空表示关闭加密
+	Key                       string       // 鉴权密钥，必须显式配置，无弱默认
+	Encrypt                   string       // 加密密钥，空表示关闭加密，无弱默认
 	EncryptType               ENCRYPT_TYPE // 加密算法，默认 ChaCha20-Poly1305（整帧 AEAD）
 	Compress                  int          // 压缩阈值，0 表示关闭
 	CompressType              COMPRESS_TYPE // 压缩算法，默认 ZSTD
@@ -50,8 +51,8 @@ func DefaultConfig() *Config {
 		PingTimeoutInter:          30,
 		ConnTimeout:               60,
 		ConnectTimeout:            10,
-		Key:                       "123456",
-		Encrypt:                   "default",
+		Key:                       "",
+		Encrypt:                   "",
 		EncryptType:               EncryptChaCha20,
 		Compress:                  128,
 		CompressType:              CompressZstd,
@@ -62,6 +63,32 @@ func DefaultConfig() *Config {
 		MaxSonny:                  10240,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
+	}
+}
+
+// ValidateConfig rejects missing or known-weak secrets.
+func ValidateConfig(cfg *Config) error {
+	if cfg == nil {
+		return errors.New("nil config")
+	}
+	if strings.TrimSpace(cfg.Key) == "" {
+		return errors.New("auth key (-key) is required")
+	}
+	if isWeakSecret(cfg.Key) {
+		return errors.New("auth key (-key) is a known weak default; set a strong key")
+	}
+	if cfg.Encrypt != "" && isWeakSecret(cfg.Encrypt) {
+		return errors.New("encrypt key (-encrypt) is a known weak default; set a strong key or leave empty to disable")
+	}
+	return nil
+}
+
+func isWeakSecret(s string) bool {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "123456", "default", "password", "pass", "secret", "admin":
+		return true
+	default:
+		return false
 	}
 }
 
