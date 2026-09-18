@@ -93,29 +93,29 @@ func (f *serverAddrs) Set(value string) error {
 
 // ConfigFile defines JSON configuration file structure.
 type ConfigFile struct {
-	Type        string   `json:"type"`
-	Proto       []string `json:"proto"`
-	ProxyProto  []string `json:"proxyproto"`
-	Listen      []string `json:"listen"`
-	Name        string   `json:"name"`
-	Server      string   `json:"server"`
-	Servers     []string `json:"servers"`
-	FromAddr    []string `json:"fromaddr"`
-	ToAddr      []string `json:"toaddr"`
-	Key         string   `json:"key"`
-	Encrypt     *string  `json:"encrypt"`
-	EncryptType *string  `json:"encrypttype"`
-	Compress    *int     `json:"compress"`
-	CompressType *string `json:"compresstype"`
-	NoLog       *int     `json:"nolog"`
-	NoPrint     *int     `json:"noprint"`
-	LogLevel    string   `json:"loglevel"`
-	Profile     *int     `json:"profile"`
-	Ping        *bool    `json:"ping"`
-	Username    string   `json:"username"`
-	Password    string   `json:"password"`
-	MaxClient   *int     `json:"maxclient"`
-	MaxConn     *int     `json:"maxconn"`
+	Type         string   `json:"type"`
+	Proto        []string `json:"proto,omitempty"`
+	ProxyProto   []string `json:"proxyproto,omitempty"`
+	Listen       []string `json:"listen,omitempty"`
+	Name         string   `json:"name,omitempty"`
+	Server       string   `json:"server,omitempty"`
+	Servers      []string `json:"servers,omitempty"`
+	FromAddr     []string `json:"fromaddr,omitempty"`
+	ToAddr       []string `json:"toaddr,omitempty"`
+	Key          string   `json:"key"`
+	Encrypt      *string  `json:"encrypt,omitempty"`
+	EncryptType  *string  `json:"encrypttype,omitempty"`
+	Compress     *int     `json:"compress,omitempty"`
+	CompressType *string  `json:"compresstype,omitempty"`
+	NoLog        *int     `json:"nolog,omitempty"`
+	NoPrint      *int     `json:"noprint,omitempty"`
+	LogLevel     string   `json:"loglevel,omitempty"`
+	Profile      *int     `json:"profile,omitempty"`
+	Ping         *bool    `json:"ping,omitempty"`
+	Username     string   `json:"username,omitempty"`
+	Password     string   `json:"password,omitempty"`
+	MaxClient    *int     `json:"maxclient,omitempty"`
+	MaxConn      *int     `json:"maxconn,omitempty"`
 }
 
 func loadConfigFile(filePath string) (*ConfigFile, error) {
@@ -136,6 +136,9 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version information")
 	showVersionShort := flag.Bool("v", false, "print version information")
 	configPath := flag.String("config", "", "path to json configuration file")
+	genconfig := flag.Bool("genconfig", false, "generate multi-path server + all mode client configs and exit")
+	outdir := flag.String("outdir", ".", "output directory for -genconfig")
+	force := flag.Bool("force", false, "overwrite existing files when using -genconfig")
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
 	var protos protoFlags
@@ -170,6 +173,14 @@ func main() {
 
 	if *showVersion || *showVersionShort {
 		fmt.Println(version.Full())
+		return
+	}
+
+	if *genconfig {
+		if err := generateConfigs(*outdir, *force); err != nil {
+			fmt.Fprintf(os.Stderr, "genconfig failed: %v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 

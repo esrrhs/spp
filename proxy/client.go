@@ -522,7 +522,7 @@ func (c *Client) probePipe(wg *thread.Group, pipe *mainPipe) error {
 	}
 	size := c.config.ProbeSize
 	if size <= 0 {
-		size = 32 * 1024
+		size = 64 * 1024
 	}
 	// Grey pipes probe twice as often.
 	ticker := time.NewTicker(time.Duration(inter) * time.Second)
