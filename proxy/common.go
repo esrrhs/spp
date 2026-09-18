@@ -39,6 +39,8 @@ type Config struct {
 	MaxSonny                  int          // 最大连接数目
 	MainWriteChannelTimeoutMs int          // 主通道转发消息超时
 	Congestion                string       // 拥塞算法
+	ProbeInter                int          // 多通道测速间隔（秒）
+	ProbeSize                 int          // 测速 payload 字节数
 }
 
 func DefaultConfig() *Config {
@@ -63,6 +65,8 @@ func DefaultConfig() *Config {
 		MaxSonny:                  10240,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
+		ProbeInter:                5,
+		ProbeSize:                 32 * 1024,
 	}
 }
 
@@ -92,6 +96,11 @@ func isWeakSecret(s string) bool {
 	}
 }
 
+// frameRouter selects an underlay pipe for outbound session frames.
+type frameRouter interface {
+	routeFrame(f *ProxyFrame, interactive bool)
+}
+
 type ProxyConn struct {
 	conn        network.Conn
 	established int32 // atomic bool
@@ -116,6 +125,8 @@ type ProxyConn struct {
 	mu                sync.RWMutex
 	isClosed          bool
 	closeOnce         sync.Once
+	// If set, SendFrame/SendData delegate to multi-pipe selection.
+	router frameRouter
 }
 
 func (p *ProxyConn) closeConn() {
@@ -236,9 +247,13 @@ func (p *ProxyConn) pickRecvCh() *msgChannel {
 
 // SendFrame enqueues a frame on the main priority queue (control jumps ahead).
 func (p *ProxyConn) SendFrame(f *ProxyFrame) {
+	if p.router != nil {
+		p.router.routeFrame(f, false)
+		return
+	}
 	if q := p.pickSendQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -251,6 +266,10 @@ func (p *ProxyConn) SendFrame(f *ProxyFrame) {
 
 // SendData enqueues DATA: interactive can jump ahead of bulk on the same queue.
 func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
+	if p.router != nil {
+		p.router.routeFrame(f, isInteractive)
+		return
+	}
 	if q := p.pickSendQ(); q != nil {
 		prio := prioBulk
 		if isInteractive {
@@ -268,7 +287,7 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -339,6 +358,18 @@ func checkProxyFame(f *ProxyFrame) error {
 	case FRAME_TYPE_AUTH_CHALLENGE:
 		if f.AuthChallengeFrame == nil {
 			return errors.New("AuthChallengeFrame nil")
+		}
+	case FRAME_TYPE_CHANNEL_JOIN:
+		if f.ChannelJoinFrame == nil {
+			return errors.New("ChannelJoinFrame nil")
+		}
+	case FRAME_TYPE_CHANNEL_JOIN_RSP:
+		if f.ChannelJoinRspFrame == nil {
+			return errors.New("ChannelJoinRspFrame nil")
+		}
+	case FRAME_TYPE_SPEEDTEST:
+		if f.SpeedTestFrame == nil {
+			return errors.New("SpeedTestFrame nil")
 		}
 	default:
 		return errors.New("Type error")
@@ -740,12 +771,13 @@ func processPing(f *ProxyFrame, proxyconn *ProxyConn, pongflag *int32, pongtime 
 	*pongtime = f.PingFrame.Time
 }
 
-func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) {
+func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) time.Duration {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	atomic.StoreInt32(&proxyconn.pinged, 0)
 	if showping {
 		loggo.Info("pong %s %s", proxyconn.conn.Info(), elapse.String())
 	}
+	return elapse
 }
 
 func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, timeout int) error {

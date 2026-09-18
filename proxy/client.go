@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/esrrhs/gohome/loggo"
@@ -12,52 +13,100 @@ import (
 	"github.com/esrrhs/gohome/thread"
 )
 
+// ServerConn is the logical client↔server session. Business Inputer/Outputer
+// attach here; underlay traffic is load-balanced across hub pipes.
 type ServerConn struct {
 	ProxyConn
-	outputs []*Outputer
-	inputs  []*Inputer
+	outputs   []*Outputer
+	inputs    []*Inputer
+	svcMu     sync.Mutex // guards inputs/outputs vs process* readers
+	hub       *channelHub
+	sessionID uint64
 }
 
 func (s *ServerConn) closeServices() {
-	for _, o := range s.outputs {
-		o.Close()
-	}
-	for _, i := range s.inputs {
-		i.Close()
-	}
+	s.svcMu.Lock()
+	outs := s.outputs
+	ins := s.inputs
 	s.outputs = nil
 	s.inputs = nil
+	s.svcMu.Unlock()
+	for _, o := range outs {
+		o.Close()
+	}
+	for _, i := range ins {
+		i.Close()
+	}
+}
+
+func (s *ServerConn) serviceSnapshot() (inputs []*Inputer, outputs []*Outputer) {
+	s.svcMu.Lock()
+	defer s.svcMu.Unlock()
+	return s.inputs, s.outputs
+}
+
+func (s *ServerConn) appendInput(in *Inputer) {
+	s.svcMu.Lock()
+	s.inputs = append(s.inputs, in)
+	s.svcMu.Unlock()
+}
+
+func (s *ServerConn) appendOutput(out *Outputer) {
+	s.svcMu.Lock()
+	s.outputs = append(s.outputs, out)
+	s.svcMu.Unlock()
 }
 
 type Client struct {
-	config      *Config
-	server      string
-	serverproto string
-	name        string
-	clienttype  CLIENT_TYPE
-	proxyproto  []PROXY_PROTO
-	fromaddr    []string
-	toaddr      []string
-	serverconn  *ServerConn
-	connMu      sync.RWMutex
-	wg          *thread.Group
+	config       *Config
+	servers      []string
+	serverprotos []string
+	name         string
+	clienttype   CLIENT_TYPE
+	proxyproto   []PROXY_PROTO
+	fromaddr     []string
+	toaddr       []string
+	serverconn   *ServerConn
+	connMu       sync.Mutex
+	loginFlight  int32 // 1 while primary LOGIN in flight
+	pipeLive     []int32
+	wg           *thread.Group
 }
 
-func NewClient(config *Config, serverproto string, server string, name string, clienttypestr string, proxyprotostr []string, fromaddr []string, toaddr []string) (*Client, error) {
-
+// NewClient dials one or more underlay (proto, addr) pairs that share one logical session.
+// len(servers) must equal len(serverprotos), or be 1 (same addr for every proto).
+func NewClient(config *Config, serverprotos []string, servers []string, name string, clienttypestr string, proxyprotostr []string, fromaddr []string, toaddr []string) (*Client, error) {
 	if config == nil {
 		config = DefaultConfig()
 	}
 	if err := ValidateConfig(config); err != nil {
 		return nil, err
 	}
-
-	cn, err := network.NewConn(serverproto)
-	if cn == nil {
-		return nil, err
+	if len(serverprotos) == 0 {
+		return nil, errors.New("no server proto")
 	}
-	setCongestion(cn, config)
-	cn.Close()
+	if len(servers) == 0 {
+		return nil, errors.New("no server addr")
+	}
+	if len(servers) == 1 && len(serverprotos) > 1 {
+		expanded := make([]string, len(serverprotos))
+		for i := range expanded {
+			expanded[i] = servers[0]
+		}
+		servers = expanded
+	}
+	if len(servers) != len(serverprotos) {
+		return nil, errors.New("server proto/addr len mismatch")
+	}
+
+	for _, sp := range serverprotos {
+		cn, err := network.NewConn(sp)
+		if cn == nil {
+			return nil, err
+		}
+		setCongestion(cn, config)
+		cn.Close()
+	}
 
 	clienttypestr = strings.ToUpper(clienttypestr)
 	clienttype, ok := CLIENT_TYPE_value[clienttypestr]
@@ -77,15 +126,16 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 	wg := thread.NewGroup("Client"+" "+clienttypestr, nil, nil)
 
 	c := &Client{
-		config:      config,
-		server:      server,
-		serverproto: serverproto,
-		name:        name,
-		clienttype:  CLIENT_TYPE(clienttype),
-		proxyproto:  proxyproto,
-		fromaddr:    fromaddr,
-		toaddr:      toaddr,
-		wg:          wg,
+		config:       config,
+		servers:      servers,
+		serverprotos: serverprotos,
+		name:         name,
+		clienttype:   CLIENT_TYPE(clienttype),
+		proxyproto:   proxyproto,
+		fromaddr:     fromaddr,
+		toaddr:       toaddr,
+		pipeLive:     make([]int32, len(serverprotos)),
+		wg:           wg,
 	}
 
 	wg.Go("Client state"+" "+clienttypestr, func() error {
@@ -105,99 +155,237 @@ func (c *Client) Close() {
 }
 
 func (c *Client) connect() error {
-	loggo.Info("connect start %s", c.server)
+	loggo.Info("connect start protos=%v addrs=%v", c.serverprotos, c.servers)
 
 	checkTicker := time.NewTicker(time.Second)
 	defer checkTicker.Stop()
 
-	exit := false
-	for !exit {
+	for {
 		select {
 		case <-c.wg.Done():
-			exit = true
+			loggo.Info("connect end")
+			return nil
 		case <-checkTicker.C:
-			c.connMu.RLock()
-			sconn := c.serverconn
-			c.connMu.RUnlock()
-			if sconn == nil {
-				dialer, err := network.NewConn(c.serverproto)
+			for i := range c.serverprotos {
+				if atomic.LoadInt32(&c.pipeLive[i]) != 0 {
+					continue
+				}
+				idx := i
+				proto := c.serverprotos[idx]
+				addr := c.servers[idx]
+				dialer, err := network.NewConn(proto)
 				if dialer == nil {
-					loggo.Error("connect NewConn fail: %s %v", c.server, err)
-					break
+					loggo.Error("connect NewConn fail: %s %s %v", proto, addr, err)
+					continue
 				}
 				setCongestion(dialer, c.config)
-				targetconn, err := dialWithTimeout(dialer, c.server, c.config.ConnectTimeout)
+				targetconn, err := dialWithTimeout(dialer, addr, c.config.ConnectTimeout)
 				if err != nil {
 					dialer.Close()
-					loggo.Error("connect Dial fail: %s %s", c.server, err.Error())
-					break
+					loggo.Error("connect Dial fail: %s %s %s", proto, addr, err.Error())
+					continue
 				}
-				newConn := &ServerConn{ProxyConn: ProxyConn{conn: targetconn}}
-				c.connMu.Lock()
-				c.serverconn = newConn
-				c.connMu.Unlock()
-				c.wg.Go("Client useServer"+" "+targetconn.Info(), func() error {
-					return c.useServer(newConn)
+				atomic.StoreInt32(&c.pipeLive[idx], 1)
+				c.wg.Go("Client usePipe "+proto+" "+addr, func() error {
+					defer atomic.StoreInt32(&c.pipeLive[idx], 0)
+					return c.usePipe(idx, proto, addr, targetconn)
 				})
 			}
 		}
 	}
-
-	loggo.Info("connect end %s", c.server)
-	return nil
 }
 
-func (c *Client) useServer(serverconn *ServerConn) error {
-	loggo.Info("useServer %s", serverconn.conn.Info())
+func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) error {
+	loggo.Info("usePipe start %s %s", proto, addr)
 
+	pipe := &mainPipe{
+		ProxyConn: ProxyConn{conn: conn},
+		proto:     proto,
+		addr:      addr,
+	}
 	sendq := newPrioQueue(c.config.MainBuffer)
 	recvq := newPrioQueue(c.config.MainBuffer)
+	pipe.sendq = sendq
+	pipe.recvq = recvq
+	pipe.setCodec(defaultFrameCodec(c.config))
 
-	serverconn.sendq = sendq
-	serverconn.recvq = recvq
-	serverconn.setCodec(defaultFrameCodec(c.config))
-
-	wg := thread.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
-		loggo.Info("group start exit %s", serverconn.conn.Info())
-		serverconn.closeServices()
-		serverconn.conn.Close()
-		serverconn.CloseChannels()
-		loggo.Info("group end exit %s", serverconn.conn.Info())
+	wg := thread.NewGroup("Client usePipe "+proto+" "+addr, c.wg, func() {
+		loggo.Info("pipe group exit %s %s", proto, addr)
+		if pipe.hub != nil {
+			pipe.hub.remove(pipe)
+		}
+		pipe.conn.Close()
+		pipe.CloseChannels()
+		c.onPipeGone()
 	})
 
 	var pingflag int32
 	var pongflag int32
 	var pongtime int64
 
-	wg.Go("Client recvFrom"+" "+serverconn.conn.Info(), func() error {
-		return recvFrom(wg, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize)
+	wg.Go("Client recvFrom "+proto, func() error {
+		return recvFrom(wg, &pipe.ProxyConn, pipe.conn, c.config.MaxMsgSize)
 	})
-
-	wg.Go("Client sendTo"+" "+serverconn.conn.Info(), func() error {
-		return sendTo(wg, sendq, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
+	wg.Go("Client sendTo "+proto, func() error {
+		return sendTo(wg, sendq, &pipe.ProxyConn, pipe.conn, c.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
-
-	wg.Go("Client checkPingActive"+" "+serverconn.conn.Info(), func() error {
-		return checkPingActive(wg, &serverconn.ProxyConn, c.config.EstablishedTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
+	wg.Go("Client checkPingActive "+proto, func() error {
+		err := checkPingActive(wg, &pipe.ProxyConn, c.config.EstablishedTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
+		if err != nil {
+			pipe.markGray(err.Error())
+		}
+		return err
 	})
-
-	wg.Go("Client checkNeedClose"+" "+serverconn.conn.Info(), func() error {
-		return checkNeedClose(wg, &serverconn.ProxyConn)
+	wg.Go("Client checkNeedClose "+proto, func() error {
+		return checkNeedClose(wg, &pipe.ProxyConn)
 	})
-
-	wg.Go("Client process"+" "+serverconn.conn.Info(), func() error {
-		return c.process(wg, recvq, serverconn, &pongflag, &pongtime)
+	wg.Go("Client processPipe "+proto, func() error {
+		return c.processPipe(wg, recvq, pipe, &pongflag, &pongtime)
+	})
+	wg.Go("Client probePipe "+proto, func() error {
+		return c.probePipe(wg, pipe)
 	})
 
 	wg.Wait()
-	c.connMu.Lock()
-	if c.serverconn == serverconn {
-		c.serverconn = nil
-	}
-	c.connMu.Unlock()
-	loggo.Info("useServer close %s %s", c.server, serverconn.conn.Info())
-
+	loggo.Info("usePipe close %s %s", proto, addr)
 	return nil
+}
+
+func (c *Client) onPipeGone() {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	sess := c.serverconn
+	if sess == nil || sess.hub == nil {
+		return
+	}
+	if sess.hub.liveCount() > 0 {
+		return
+	}
+	loggo.Info("all pipes gone, tear down session")
+	sess.closeServices()
+	sess.CloseChannels()
+	sess.setEstablished(false)
+	c.serverconn = nil
+	atomic.StoreInt32(&c.loginFlight, 0)
+}
+
+func (c *Client) ensureSession() *ServerConn {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	if c.serverconn != nil {
+		return c.serverconn
+	}
+	hub := newChannelHub(c.config)
+	sess := &ServerConn{
+		ProxyConn: ProxyConn{
+			recvq:  newPrioQueue(c.config.MainBuffer),
+			router: hub,
+		},
+		hub: hub,
+	}
+	sess.setCodec(defaultFrameCodec(c.config))
+	c.serverconn = sess
+
+	c.wg.Go("Client processSession", func() error {
+		return c.processSession(c.wg, sess)
+	})
+	return sess
+}
+
+func (c *Client) processPipe(wg *thread.Group, recvq *prioQueue, pipe *mainPipe, pongflag *int32, pongtime *int64) error {
+	loggo.Info("processPipe start %s %s", pipe.proto, pipe.addr)
+
+	for !isExit(wg) {
+		v, closed, ok := recvq.PopWait(time.Second)
+		if !ok {
+			if closed {
+				break
+			}
+			continue
+		}
+		f := v.(*ProxyFrame)
+
+		switch f.Type {
+		case FRAME_TYPE_AUTH_CHALLENGE:
+			c.onAuthChallenge(pipe, f.AuthChallengeFrame.Challenge)
+
+		case FRAME_TYPE_LOGINRSP:
+			c.processLoginRsp(f, pipe)
+
+		case FRAME_TYPE_CHANNEL_JOIN_RSP:
+			c.processJoinRsp(f, pipe)
+
+		case FRAME_TYPE_PING:
+			processPing(f, &pipe.ProxyConn, pongflag, pongtime)
+
+		case FRAME_TYPE_PONG:
+			rtt := processPong(f, &pipe.ProxyConn, c.config.ShowPing)
+			pipe.noteRTT(rtt)
+
+		case FRAME_TYPE_SPEEDTEST:
+			c.processSpeedTest(f, pipe)
+
+		case FRAME_TYPE_DATA, FRAME_TYPE_OPEN, FRAME_TYPE_OPENRSP, FRAME_TYPE_CLOSE:
+			sess := c.currentSession()
+			if sess != nil {
+				sess.RecvFrame(f)
+			}
+
+		default:
+			loggo.Error("processPipe unexpected %s on %s", f.Type.String(), pipe.proto)
+		}
+	}
+	loggo.Info("processPipe end %s %s", pipe.proto, pipe.addr)
+	return nil
+}
+
+func (c *Client) currentSession() *ServerConn {
+	c.connMu.Lock()
+	defer c.connMu.Unlock()
+	return c.serverconn
+}
+
+func (c *Client) onAuthChallenge(pipe *mainPipe, challenge []byte) {
+	// Wait briefly if another pipe is logging in.
+	deadline := time.Now().Add(time.Duration(c.config.EstablishedTimeout) * time.Second)
+	for {
+		c.connMu.Lock()
+		sess := c.serverconn
+		established := sess != nil && sess.isEstablished()
+		sid := uint64(0)
+		if sess != nil {
+			sid = sess.sessionID
+		}
+		flight := atomic.LoadInt32(&c.loginFlight)
+		c.connMu.Unlock()
+
+		if established && sid != 0 {
+			c.sendChannelJoin(pipe, sid, challenge)
+			return
+		}
+		if flight == 0 && atomic.CompareAndSwapInt32(&c.loginFlight, 0, 1) {
+			c.loginWithChallenge(pipe, challenge)
+			return
+		}
+		if time.Now().After(deadline) {
+			loggo.Error("onAuthChallenge timeout waiting for session on %s", pipe.proto)
+			pipe.setNeedClose()
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+func (c *Client) sendChannelJoin(pipe *mainPipe, sessionID uint64, challenge []byte) {
+	f := &ProxyFrame{
+		Type: FRAME_TYPE_CHANNEL_JOIN,
+		ChannelJoinFrame: &ChannelJoinFrame{
+			SessionId: sessionID,
+			AuthProof: computeAuthProof(c.config.Key, challenge),
+		},
+	}
+	pipe.SendFrame(f)
+	loggo.Info("channel join %s %s session=%d", pipe.proto, pipe.addr, sessionID)
 }
 
 func (c *Client) buildLoginServices() []*LoginService {
@@ -216,8 +404,8 @@ func (c *Client) buildLoginServices() []*LoginService {
 	return out
 }
 
-func (c *Client) loginWithChallenge(serverconn *ServerConn, challenge []byte) {
-	codec := serverconn.getCodec()
+func (c *Client) loginWithChallenge(pipe *mainPipe, challenge []byte) {
+	codec := pipe.getCodec()
 	services := c.buildLoginServices()
 
 	f := &ProxyFrame{}
@@ -235,17 +423,154 @@ func (c *Client) loginWithChallenge(serverconn *ServerConn, challenge []byte) {
 		f.LoginFrame.Toaddr = services[0].Toaddr
 	}
 
-	serverconn.SendFrame(f)
-
-	loggo.Info("start login %s name=%s services=%d compress=%s encrypt=%s (hmac)",
-		c.server, f.LoginFrame.Name, len(services),
-		compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
+	pipe.SendFrame(f)
+	loggo.Info("start login via %s %s name=%s services=%d (hmac)",
+		pipe.proto, pipe.addr, f.LoginFrame.Name, len(services))
 }
 
-func (c *Client) process(wg *thread.Group, recvq *prioQueue, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
-	loggo.Info("process start %s", serverconn.conn.Info())
+func (c *Client) processLoginRsp(f *ProxyFrame, pipe *mainPipe) {
+	if !f.LoginRspFrame.Ret {
+		atomic.StoreInt32(&c.loginFlight, 0)
+		pipe.setNeedClose()
+		loggo.Error("processLoginRsp fail %s %s", pipe.proto, f.LoginRspFrame.Msg)
+		return
+	}
 
+	sess := c.ensureSession()
+
+	codec := pipe.getCodec()
+	if f.LoginRspFrame.CompressType != CompressUnspecified {
+		codec.CompressType = f.LoginRspFrame.CompressType
+	}
+	if f.LoginRspFrame.EncryptType != EncryptUnspecified {
+		codec.EncryptType = f.LoginRspFrame.EncryptType
+	}
+	pipe.setCodec(codec)
+	sess.setCodec(codec)
+
+	c.connMu.Lock()
+	sess.sessionID = f.LoginRspFrame.SessionId
+	needInit := !sess.isEstablished()
+	c.connMu.Unlock()
+
+	if needInit {
+		err := c.iniService(c.wg, sess)
+		if err != nil {
+			atomic.StoreInt32(&c.loginFlight, 0)
+			pipe.setNeedClose()
+			loggo.Error("processLoginRsp iniService fail %s", err)
+			return
+		}
+		sess.setEstablished(true)
+	}
+
+	sess.hub.add(pipe)
+	pipe.markActive("login ok")
+	pipe.setEstablished(true)
+	atomic.StoreInt32(&c.loginFlight, 0)
+
+	loggo.Info("processLoginRsp ok via %s session=%d compress=%s encrypt=%s",
+		pipe.proto, sess.sessionID, compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
+}
+
+func (c *Client) processJoinRsp(f *ProxyFrame, pipe *mainPipe) {
+	if !f.ChannelJoinRspFrame.Ret {
+		pipe.setNeedClose()
+		loggo.Error("processJoinRsp fail %s %s", pipe.proto, f.ChannelJoinRspFrame.Msg)
+		return
+	}
+	sess := c.currentSession()
+	if sess == nil || !sess.isEstablished() {
+		pipe.setNeedClose()
+		loggo.Error("processJoinRsp no session for %s", pipe.proto)
+		return
+	}
+	pipe.setCodec(sess.getCodec())
+	sess.hub.add(pipe)
+	pipe.markActive("join ok")
+	pipe.setEstablished(true)
+	loggo.Info("processJoinRsp ok %s %s session=%d", pipe.proto, pipe.addr, sess.sessionID)
+}
+
+func (c *Client) processSpeedTest(f *ProxyFrame, pipe *mainPipe) {
+	st := f.SpeedTestFrame
+	if st == nil || !st.Echo {
+		return
+	}
+	elapsed := time.Now().UnixNano() - st.SendTime
+	if elapsed <= 0 {
+		return
+	}
+	n := len(st.Payload)
+	if n == 0 {
+		n = 1
+	}
+	// Round-trip bytes estimate: send + echo.
+	bps := int64(n*2) * int64(time.Second) / elapsed
+	atomic.StoreInt64(&pipe.thrBps, bps)
+	pipe.noteRTT(time.Duration(elapsed))
+	pipe.markActive("probe ok")
+	if c.config.ShowPing {
+		loggo.Info("speedtest %s thr=%s rtt=%s", pipe.proto, formatBps(bps), time.Duration(elapsed).String())
+	}
+}
+
+func (c *Client) probePipe(wg *thread.Group, pipe *mainPipe) error {
+	inter := c.config.ProbeInter
+	if inter <= 0 {
+		inter = 5
+	}
+	size := c.config.ProbeSize
+	if size <= 0 {
+		size = 32 * 1024
+	}
+	// Grey pipes probe twice as often.
+	ticker := time.NewTicker(time.Duration(inter) * time.Second)
+	defer ticker.Stop()
+
+	var seq int64
+	for {
+		select {
+		case <-wg.Done():
+			return nil
+		case <-ticker.C:
+			if !pipe.isEstablished() {
+				continue
+			}
+			seq++
+			payload := make([]byte, size)
+			for i := range payload {
+				payload[i] = byte(seq + int64(i))
+			}
+			now := time.Now().UnixNano()
+			atomic.StoreInt64(&pipe.probeID, seq)
+			atomic.StoreInt64(&pipe.probeStart, now)
+			f := &ProxyFrame{
+				Type: FRAME_TYPE_SPEEDTEST,
+				SpeedTestFrame: &SpeedTestFrame{
+					Id:       seq,
+					SendTime: now,
+					Payload:  payload,
+					Echo:     false,
+				},
+			}
+			pipe.SendFrame(f)
+		}
+	}
+}
+
+func (c *Client) processSession(wg *thread.Group, sess *ServerConn) error {
+	loggo.Info("processSession start")
+	recvq := sess.recvq
 	for !isExit(wg) {
+		// Session ends when torn down.
+		c.connMu.Lock()
+		alive := c.serverconn == sess
+		c.connMu.Unlock()
+		if !alive {
+			break
+		}
+
 		v, closed, ok := recvq.PopWait(time.Second)
 		if !ok {
 			if closed {
@@ -254,64 +579,19 @@ func (c *Client) process(wg *thread.Group, recvq *prioQueue, serverconn *ServerC
 			continue
 		}
 		f := v.(*ProxyFrame)
-
 		switch f.Type {
-		case FRAME_TYPE_AUTH_CHALLENGE:
-			c.loginWithChallenge(serverconn, f.AuthChallengeFrame.Challenge)
-
-		case FRAME_TYPE_LOGINRSP:
-			c.processLoginRsp(wg, f, serverconn)
-
-		case FRAME_TYPE_PING:
-			processPing(f, &serverconn.ProxyConn, pongflag, pongtime)
-
-		case FRAME_TYPE_PONG:
-			processPong(f, &serverconn.ProxyConn, c.config.ShowPing)
-
 		case FRAME_TYPE_DATA:
-			c.processData(f, serverconn)
-
+			c.processData(f, sess)
 		case FRAME_TYPE_OPEN:
-			c.processOpen(f, serverconn)
-
+			c.processOpen(f, sess)
 		case FRAME_TYPE_OPENRSP:
-			c.processOpenRsp(f, serverconn)
-
+			c.processOpenRsp(f, sess)
 		case FRAME_TYPE_CLOSE:
-			c.processClose(f, serverconn)
+			c.processClose(f, sess)
 		}
 	}
-	loggo.Info("process end %s", serverconn.conn.Info())
+	loggo.Info("processSession end")
 	return nil
-}
-
-func (c *Client) processLoginRsp(wg *thread.Group, f *ProxyFrame, serverconn *ServerConn) {
-	if !f.LoginRspFrame.Ret {
-		serverconn.setNeedClose()
-		loggo.Error("processLoginRsp fail %s %s", c.server, f.LoginRspFrame.Msg)
-		return
-	}
-
-	codec := serverconn.getCodec()
-	if f.LoginRspFrame.CompressType != CompressUnspecified {
-		codec.CompressType = f.LoginRspFrame.CompressType
-	}
-	if f.LoginRspFrame.EncryptType != EncryptUnspecified {
-		codec.EncryptType = f.LoginRspFrame.EncryptType
-	}
-	serverconn.setCodec(codec)
-
-	loggo.Info("processLoginRsp ok %s compress=%s encrypt=%s",
-		c.server, compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
-
-	err := c.iniService(wg, serverconn)
-	if err != nil {
-		serverconn.setNeedClose()
-		loggo.Error("processLoginRsp iniService fail %s %s", c.server, err)
-		return
-	}
-
-	serverconn.setEstablished(true)
 }
 
 func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
@@ -331,7 +611,7 @@ func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 				serverConn.closeServices()
 				return err
 			}
-			serverConn.inputs = append(serverConn.inputs, input)
+			serverConn.appendInput(input)
 			loggo.Info("iniService client input[%d] %s %s -> %s", i, svc.Proxyproto.String(), svc.Fromaddr, svc.Toaddr)
 		}
 	case CLIENT_TYPE_REVERSE_PROXY, CLIENT_TYPE_REVERSE_SOCKS5:
@@ -341,7 +621,7 @@ func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 				serverConn.closeServices()
 				return err
 			}
-			serverConn.outputs = append(serverConn.outputs, output)
+			serverConn.appendOutput(output)
 			loggo.Info("iniService client output[%d] proto=%s", i, svc.Proxyproto.String())
 		}
 	default:
@@ -352,13 +632,14 @@ func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 
 func (c *Client) processData(f *ProxyFrame, serverconn *ServerConn) {
 	id := f.DataFrame.Id
-	for _, in := range serverconn.inputs {
+	inputs, outputs := serverconn.serviceSnapshot()
+	for _, in := range inputs {
 		if in.hasSonny(id) {
 			in.processDataFrame(f)
 			return
 		}
 	}
-	for _, out := range serverconn.outputs {
+	for _, out := range outputs {
 		if out.hasSonny(id) {
 			out.processDataFrame(f)
 			return
@@ -367,12 +648,14 @@ func (c *Client) processData(f *ProxyFrame, serverconn *ServerConn) {
 }
 
 func (c *Client) processOpen(f *ProxyFrame, serverconn *ServerConn) {
-	routeOpenToOutput(f, serverconn.outputs)
+	_, outputs := serverconn.serviceSnapshot()
+	routeOpenToOutput(f, outputs)
 }
 
 func (c *Client) processOpenRsp(f *ProxyFrame, serverconn *ServerConn) {
 	id := f.OpenRspFrame.Id
-	for _, in := range serverconn.inputs {
+	inputs, _ := serverconn.serviceSnapshot()
+	for _, in := range inputs {
 		if in.hasSonny(id) {
 			in.processOpenRspFrame(f)
 			return
@@ -382,13 +665,14 @@ func (c *Client) processOpenRsp(f *ProxyFrame, serverconn *ServerConn) {
 
 func (c *Client) processClose(f *ProxyFrame, serverconn *ServerConn) {
 	id := f.CloseFrame.Id
-	for _, in := range serverconn.inputs {
+	inputs, outputs := serverconn.serviceSnapshot()
+	for _, in := range inputs {
 		if in.hasSonny(id) {
 			in.processCloseFrame(f)
 			return
 		}
 	}
-	for _, out := range serverconn.outputs {
+	for _, out := range outputs {
 		if out.hasSonny(id) {
 			out.processCloseFrame(f)
 			return

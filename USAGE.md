@@ -52,6 +52,19 @@ You can listen on multiple ports with different protocols simultaneously:
 ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999 -proto ricmp -listen 0.0.0.0
 ```
 
+Client can attach **all** of those underlays into one logical session. Traffic is sent on the highest-throughput active path; unhealthy paths are greyed out, probed with `SPEEDTEST`, and re-enabled when they recover:
+
+```bash
+./spp -type proxy_client \
+  -proto tcp -server www.server.com:8888 \
+  -proto rudp -server www.server.com:9999 \
+  -proto ricmp -server www.server.com \
+  -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
+  -key 'your-auth-key' -encrypt 'your-encrypt-key'
+```
+
+A single `-server` may be repeated for every `-proto` when the address is the same.
+
 ### Client
 
 Map the remote server's port `8080` to local port `8080` over TCP:

@@ -93,7 +93,7 @@ func TestE2E_TCP_ForwardProxy(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "test_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -121,6 +121,76 @@ func TestE2E_TCP_ForwardProxy(t *testing.T) {
 	}
 }
 
+func TestE2E_TCP_MultiPath_MainChannels(t *testing.T) {
+	echoAddr, stopEcho := startTCPEchoServer(t)
+	defer stopEcho()
+
+	port1 := getFreePort(t)
+	port2 := getFreePort(t)
+	addr1 := fmt.Sprintf("127.0.0.1:%d", port1)
+	addr2 := fmt.Sprintf("127.0.0.1:%d", port2)
+
+	clientPort := getFreePort(t)
+	clientAddr := fmt.Sprintf("127.0.0.1:%d", clientPort)
+
+	cfg := DefaultConfig()
+	cfg.Key = "test-e2e-multipath"
+	cfg.Encrypt = "test-e2e-multipath-enc"
+	cfg.ProbeInter = 1
+	cfg.ProbeSize = 1024
+
+	server, err := NewServer(cfg, []string{"tcp", "tcp"}, []string{addr1, addr2})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	defer server.Close()
+
+	client, err := NewClient(cfg, []string{"tcp", "tcp"}, []string{addr1, addr2}, "mp", "PROXY",
+		[]string{"tcp"}, []string{clientAddr}, []string{echoAddr})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	// Wait until session has both pipes attached.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		client.connMu.Lock()
+		sess := client.serverconn
+		n := 0
+		if sess != nil && sess.hub != nil {
+			n = sess.hub.liveCount()
+		}
+		client.connMu.Unlock()
+		if n >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for 2 pipes, have %d", n)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	conn, err := waitForPort(clientAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("Failed to dial client proxy port: %v", err)
+	}
+	defer conn.Close()
+
+	msg := []byte("hello multipath spp")
+	conn.SetDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Write(msg); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	reply := make([]byte, len(msg))
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(reply, msg) {
+		t.Fatalf("mismatch: got %s want %s", reply, msg)
+	}
+}
+
 func TestE2E_TCP_MultiFromaddr_OneMainChannel(t *testing.T) {
 	echo1, stop1 := startTCPEchoServer(t)
 	defer stop1()
@@ -145,7 +215,7 @@ func TestE2E_TCP_MultiFromaddr_OneMainChannel(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "multi", "PROXY",
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "multi", "PROXY",
 		[]string{"tcp", "tcp"},
 		[]string{clientAddr1, clientAddr2},
 		[]string{echo1, echo2})
@@ -197,7 +267,7 @@ func TestE2E_TCP_ForwardProxy_LargeData(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "client_large", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "client_large", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -247,7 +317,7 @@ func TestE2E_TCP_ReverseProxy(t *testing.T) {
 	defer server.Close()
 
 	// In reverse proxy: fromaddr is exposed on server, toaddr is the local service connected by client
-	client, err := NewClient(cfg, "tcp", serverAddr, "reverse_client", "REVERSE_PROXY", []string{"tcp"}, []string{remoteListenAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "reverse_client", "REVERSE_PROXY", []string{"tcp"}, []string{remoteListenAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -295,7 +365,7 @@ func TestE2E_SOCKS5_ForwardProxy(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "socks_client", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "socks_client", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -386,7 +456,7 @@ func TestE2E_AuthFailure(t *testing.T) {
 	clientCfg := DefaultConfig()
 	clientCfg.Key = "wrong_password"
 
-	client, err := NewClient(clientCfg, "tcp", serverAddr, "bad_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{"127.0.0.1:9999"})
+	client, err := NewClient(clientCfg, []string{"tcp"}, []string{serverAddr}, "bad_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{"127.0.0.1:9999"})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -420,7 +490,7 @@ func TestE2E_ConcurrentDownloadAndWebBrowse(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "concurrent_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "concurrent_client", "PROXY", []string{"tcp"}, []string{clientAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}

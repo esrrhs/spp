@@ -71,10 +71,31 @@ message LoginRspFrame {
     // Agreed session codecs (echoed by server on success).
     COMPRESS_TYPE compress_type = 3;
     ENCRYPT_TYPE encrypt_type = 4;
+    // Server-local session id; extra underlay pipes CHANNEL_JOIN with this id.
+    uint64 session_id = 5;
 }
 
 message AuthChallengeFrame {
     bytes challenge = 1;
+}
+
+// Attach another underlay pipe to an existing session (same logical client).
+message ChannelJoinFrame {
+    uint64 session_id = 1;
+    bytes auth_proof = 2;
+}
+
+message ChannelJoinRspFrame {
+    bool ret = 1;
+    string msg = 2;
+}
+
+// Throughput / health probe. Server echoes with echo=true and same payload size.
+message SpeedTestFrame {
+    int64 id = 1;
+    int64 send_time = 2;
+    bytes payload = 3;
+    bool echo = 4;
 }
 
 message PingFrame {
@@ -124,6 +145,9 @@ enum FRAME_TYPE {
     OPENRSP = 6;
     CLOSE = 7;
     AUTH_CHALLENGE = 8;
+    CHANNEL_JOIN = 9;
+    CHANNEL_JOIN_RSP = 10;
+    SPEEDTEST = 11;
 }
 
 message ProxyFrame {
@@ -137,4 +161,7 @@ message ProxyFrame {
     OpenConnRspFrame openRspFrame = 8;
     CloseFrame closeFrame = 9;
     AuthChallengeFrame authChallengeFrame = 10;
+    ChannelJoinFrame channelJoinFrame = 11;
+    ChannelJoinRspFrame channelJoinRspFrame = 12;
+    SpeedTestFrame speedTestFrame = 13;
 }

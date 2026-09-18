@@ -54,7 +54,7 @@ func TestE2E_UDP_ForwardProxy(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, "tcp", serverAddr, "test_udp_client", "PROXY", []string{"udp"}, []string{clientUDPAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_udp_client", "PROXY", []string{"udp"}, []string{clientUDPAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}

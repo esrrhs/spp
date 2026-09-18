@@ -80,6 +80,17 @@ func (f *listenAddrs) Set(value string) error {
 	return nil
 }
 
+type serverAddrs []string
+
+func (f *serverAddrs) String() string {
+	return strings.Join(*f, ",")
+}
+
+func (f *serverAddrs) Set(value string) error {
+	*f = append(*f, value)
+	return nil
+}
+
 // ConfigFile defines JSON configuration file structure.
 type ConfigFile struct {
 	Type        string   `json:"type"`
@@ -88,6 +99,7 @@ type ConfigFile struct {
 	Listen      []string `json:"listen"`
 	Name        string   `json:"name"`
 	Server      string   `json:"server"`
+	Servers     []string `json:"servers"`
 	FromAddr    []string `json:"fromaddr"`
 	ToAddr      []string `json:"toaddr"`
 	Key         string   `json:"key"`
@@ -133,7 +145,8 @@ func main() {
 	var listenaddrs listenAddrs
 	flag.Var(&listenaddrs, "listen", "server listen addr")
 	name := flag.String("name", "", "optional client tag for logs; empty is fine")
-	server := flag.String("server", "", "server addr")
+	var servers serverAddrs
+	flag.Var(&servers, "server", "server addr (repeat with -proto for multi-path)")
 	var fromaddr fromFlags
 	flag.Var(&fromaddr, "fromaddr", "from addr")
 	var toaddr toFlags
@@ -189,8 +202,12 @@ func main() {
 		if !cliSet["name"] && fileCfg.Name != "" {
 			*name = fileCfg.Name
 		}
-		if !cliSet["server"] && fileCfg.Server != "" {
-			*server = fileCfg.Server
+		if len(servers) == 0 {
+			if len(fileCfg.Servers) > 0 {
+				servers = fileCfg.Servers
+			} else if fileCfg.Server != "" {
+				servers = []string{fileCfg.Server}
+			}
 		}
 		if len(fromaddr) == 0 && len(fileCfg.FromAddr) > 0 {
 			fromaddr = fileCfg.FromAddr
@@ -280,7 +297,7 @@ func main() {
 		}
 
 		for i := range proxyproto {
-			if len(fromaddr[i]) == 0 || len(*server) == 0 || len(toaddr[i]) == 0 {
+			if len(fromaddr[i]) == 0 || len(servers) == 0 || len(toaddr[i]) == 0 {
 				fmt.Println("[proxy_client] or [reverse_proxy_client] need [server] [fromaddr] [toaddr] [proxyproto]")
 				fmt.Println()
 				flag.Usage()
@@ -303,7 +320,7 @@ func main() {
 		}
 
 		for i := range proxyproto {
-			if len(fromaddr[i]) == 0 || len(*server) == 0 {
+			if len(fromaddr[i]) == 0 || len(servers) == 0 {
 				fmt.Println("[socks5_client] or [reverse_socks5_client] need [server] [fromaddr] [proxyproto]")
 				fmt.Println()
 				flag.Usage()
@@ -319,6 +336,19 @@ func main() {
 	if *t == "server" {
 		if len(listenaddrs) != len(protos) {
 			fmt.Println("[proto] [listen] len must be equal")
+			fmt.Println()
+			flag.Usage()
+			return
+		}
+	} else {
+		if len(servers) == 0 {
+			fmt.Println("client needs at least one [server]")
+			fmt.Println()
+			flag.Usage()
+			return
+		}
+		if len(servers) != 1 && len(servers) != len(protos) {
+			fmt.Println("[proto] [server] len must be equal (or single -server for all)")
 			fmt.Println()
 			flag.Usage()
 			return
@@ -394,7 +424,7 @@ func main() {
 		clienttypestr := strings.Replace(*t, "_client", "", -1)
 		clienttypestr = strings.ToUpper(clienttypestr)
 		var err error
-		c, err = proxy.NewClient(config, protos[0], *server, *name, clienttypestr, proxyproto, fromaddr, toaddr)
+		c, err = proxy.NewClient(config, protos, servers, *name, clienttypestr, proxyproto, fromaddr, toaddr)
 		if err != nil {
 			loggo.Error("main NewClient fail %s", err.Error())
 			return
