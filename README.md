@@ -90,13 +90,26 @@ Encryption off: omit `-encrypt` or set it empty. Auth (`-key`) is always require
 
 ### 3. Using Configuration Files
 
-Edit `config_server.json` / `config_client.json` and replace the placeholder secrets, then:
+One-shot generate a multi-path server config plus one client config per mode (forward / reverse / socks5 / reverse socks5), with shared random keys:
+
+```bash
+./spp -genconfig
+# optional: ./spp -genconfig -outdir ./conf -force
+```
+
+Files written:
+- `config_server.json` — listens **all** main channels (tcp/rudp/ricmp/kcp/quic/rhttp)
+- `config_proxy_client.json` — forward proxy
+- `config_reverse_proxy_client.json` — reverse proxy
+- `config_socks5_client.json` — SOCKS5
+- `config_reverse_socks5_client.json` — reverse SOCKS5
+
+Each client also dials **all** main channels. Then start the pair you need:
 
 ```bash
 ./spp -config config_server.json
-./spp -config config_client.json
+./spp -config config_proxy_client.json
 ```
-
 ---
 
 ## Documentation
