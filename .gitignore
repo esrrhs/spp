@@ -15,5 +15,8 @@
 *.log
 *.stderr
 
+# Local benchmark outputs
+benchmark/socks5_rudp/out/
+
 # Dependency directories (remove the comment below to include it)
 # vendor/

@@ -296,7 +296,7 @@ func MarshalSrpFrame(f *ProxyFrame, compress int, encrpyt string) ([]byte, error
 	}
 
 	if f.Type == FRAME_TYPE_DATA && compress > 0 && len(f.DataFrame.Data) > compress && !f.DataFrame.Compress {
-		newb := common.CompressData(f.DataFrame.Data)
+		newb := common.CompressDataZstd(f.DataFrame.Data)
 		if len(newb) < len(f.DataFrame.Data) {
 			if loggo.IsDebug() {
 				loggo.Debug("MarshalSrpFrame Compress from %d %d", len(f.DataFrame.Data), len(newb))
@@ -350,7 +350,7 @@ func UnmarshalSrpFrame(b []byte, encrpyt string) (*ProxyFrame, error) {
 	}
 
 	if f.Type == FRAME_TYPE_DATA && f.DataFrame.Compress {
-		newb, err := common.DeCompressData(f.DataFrame.Data)
+		newb, err := common.DeCompressDataZstd(f.DataFrame.Data)
 		if err != nil {
 			return nil, err
 		}
