@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"crypto/cipher"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -27,7 +28,7 @@ type Config struct {
 	ConnectTimeout            int          // 每个conn的连接超时
 	Key                       string       // 连接密码
 	Encrypt                   string       // 加密密钥，空表示关闭加密
-	EncryptType               ENCRYPT_TYPE // 加密算法，默认 RC4
+	EncryptType               ENCRYPT_TYPE // 加密算法，默认 ChaCha20-Poly1305（整帧 AEAD）
 	Compress                  int          // 压缩阈值，0 表示关闭
 	CompressType              COMPRESS_TYPE // 压缩算法，默认 ZSTD
 	ShowPing                  bool         // 是否显示ping
@@ -51,7 +52,7 @@ func DefaultConfig() *Config {
 		ConnectTimeout:            10,
 		Key:                       "123456",
 		Encrypt:                   "default",
-		EncryptType:               EncryptRC4,
+		EncryptType:               EncryptChaCha20,
 		Compress:                  128,
 		CompressType:              CompressZstd,
 		ShowPing:                  false,
@@ -82,6 +83,9 @@ type ProxyConn struct {
 	encryptType       int32 // ENCRYPT_TYPE
 	compressThreshold int32
 	encryptKey        string // guarded by mu
+	aead              cipher.AEAD
+	noncePrefix       [4]byte
+	nonceCounter      uint64
 	mu                sync.RWMutex
 	isClosed          bool
 	closeOnce         sync.Once
@@ -305,6 +309,10 @@ func checkProxyFame(f *ProxyFrame) error {
 		if f.CloseFrame == nil {
 			return errors.New("CloseFrame nil")
 		}
+	case FRAME_TYPE_AUTH_CHALLENGE:
+		if f.AuthChallengeFrame == nil {
+			return errors.New("AuthChallengeFrame nil")
+		}
 	default:
 		return errors.New("Type error")
 	}
@@ -335,7 +343,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 
 	loggo.Info("recvFrom start %s", conn.Info())
 	bs := make([]byte, 4)
-	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE)
+	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE+aeadOverhead)
 
 	for !isExit(wg) {
 		if loggo.IsDebug() {
@@ -348,7 +356,8 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 		}
 
 		msglen := binary.LittleEndian.Uint32(bs)
-		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen == 0 {
+		maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
+		if msglen > maxWire || msglen == 0 {
 			loggo.Error("recvFrom len fail: %s %d", conn.Info(), msglen)
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
@@ -362,7 +371,13 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			return err
 		}
 
-		f, err := UnmarshalSrpFrame(ds[0:msglen], proxyconn.getCodec())
+		plain, err := proxyconn.openWire(ds[0:msglen])
+		if err != nil {
+			loggo.Error("recvFrom openWire fail: %s %s", conn.Info(), err.Error())
+			return err
+		}
+
+		f, err := UnmarshalSrpFrame(plain, proxyconn.getCodec())
 		if err != nil {
 			loggo.Error("recvFrom UnmarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
 			return err
@@ -440,8 +455,15 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			return err
 		}
 
+		mb, err = proxyconn.sealWire(mb)
+		if err != nil {
+			loggo.Error("sendTo sealWire fail: %s %s", conn.Info(), err.Error())
+			return err
+		}
+
 		msglen := uint32(len(mb))
-		if msglen > uint32(maxmsgsize)+MAX_PROTO_PACK_SIZE || msglen == 0 {
+		maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
+		if msglen > maxWire || msglen == 0 {
 			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}

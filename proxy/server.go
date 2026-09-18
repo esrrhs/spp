@@ -19,7 +19,10 @@ type ClientConn struct {
 	clienttype CLIENT_TYPE
 	fromaddr   string
 	toaddr     string
-	name       string
+	name       string // optional client tag; not unique, not used for auth
+	clientID   uint64 // server-local session id for tracking
+
+	authChallenge []byte
 
 	input  *Inputer
 	output *Outputer
@@ -30,8 +33,9 @@ type Server struct {
 	listenaddrs []string
 	listenConns []network.Conn
 	wg          *thread.Group
-	clients     sync.Map
-	clientNum   int32 // atomic; tracks entries in clients
+	clients     sync.Map // key: uint64 clientID -> *ClientConn
+	clientNum   int32    // atomic; tracks entries in clients
+	nextClientID uint64  // atomic
 }
 
 func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, error) {
@@ -173,9 +177,17 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 		return s.process(wg, recvq, clientconn, &pongflag, &pongtime)
 	})
 
+	// Issue auth challenge after IO loops are running (encrypted with PSK if AEAD).
+	if err := s.sendAuthChallenge(clientconn); err != nil {
+		loggo.Error("serveClient sendAuthChallenge fail %s %s", clientconn.conn.Info(), err.Error())
+		wg.Stop()
+		wg.Wait()
+		return err
+	}
+
 	wg.Wait()
 	if clientconn.isEstablished() {
-		if _, ok := s.clients.LoadAndDelete(clientconn.name); ok {
+		if _, ok := s.clients.LoadAndDelete(clientconn.clientID); ok {
 			atomic.AddInt32(&s.clientNum, -1)
 		}
 	}
@@ -220,14 +232,32 @@ func (s *Server) process(wg *thread.Group, recvq *prioQueue, clientconn *ClientC
 
 		case FRAME_TYPE_CLOSE:
 			s.processClose(f, clientconn)
+
+		case FRAME_TYPE_AUTH_CHALLENGE:
+			loggo.Error("server unexpected AUTH_CHALLENGE from %s", clientconn.conn.Info())
 		}
 	}
 	loggo.Info("process end %s", clientconn.conn.Info())
 	return nil
 }
 
+func (s *Server) sendAuthChallenge(clientconn *ClientConn) error {
+	ch, err := makeAuthChallenge()
+	if err != nil {
+		return err
+	}
+	clientconn.authChallenge = ch
+	f := &ProxyFrame{
+		Type:               FRAME_TYPE_AUTH_CHALLENGE,
+		AuthChallengeFrame: &AuthChallengeFrame{Challenge: ch},
+	}
+	clientconn.SendFrame(f)
+	loggo.Info("sendAuthChallenge to %s", clientconn.conn.Info())
+	return nil
+}
+
 func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *ClientConn) {
-	loggo.Info("processLogin from %s %s", clientconn.conn.Info(), f.LoginFrame.String())
+	loggo.Info("processLogin from %s name=%s", clientconn.conn.Info(), f.LoginFrame.Name)
 
 	clientconn.proxyproto = f.LoginFrame.Proxyproto
 	clientconn.clienttype = f.LoginFrame.Clienttype
@@ -239,13 +269,15 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 	rf.Type = FRAME_TYPE_LOGINRSP
 	rf.LoginRspFrame = &LoginRspFrame{}
 
-	if f.LoginFrame.Key != s.config.Key {
+	authOK := verifyAuthProof(s.config.Key, clientconn.authChallenge, f.LoginFrame.AuthProof)
+	if !authOK {
 		rf.LoginRspFrame.Ret = false
-		rf.LoginRspFrame.Msg = "key error"
+		rf.LoginRspFrame.Msg = "auth proof error"
 		clientconn.SendFrame(rf)
-		loggo.Error("processLogin fail key error %s %s", clientconn.conn.Info(), f.LoginFrame.String())
+		loggo.Error("processLogin auth proof fail %s", clientconn.conn.Info())
 		return
 	}
+	clientconn.authChallenge = nil
 
 	agreeC, agreeE, err := negotiateCodec(f.LoginFrame.CompressType, f.LoginFrame.EncryptType, s.config)
 	if err != nil {
@@ -264,29 +296,23 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "has established before"
 		clientconn.SendFrame(rf)
-		loggo.Error("processLogin fail has established before %s %s", clientconn.conn.Info(), f.LoginFrame.String())
+		loggo.Error("processLogin fail has established before %s", clientconn.conn.Info())
 		return
 	}
 
-	_, loaded := s.clients.LoadOrStore(f.LoginFrame.Name, clientconn)
-	if loaded {
-		rf.LoginRspFrame.Ret = false
-		rf.LoginRspFrame.Msg = f.LoginFrame.Name + " has login before"
-		clientconn.SendFrame(rf)
-		loggo.Error("processLogin fail %s has login before %s %s", f.LoginFrame.Name, clientconn.conn.Info(), f.LoginFrame.String())
-		return
-	}
+	clientconn.clientID = atomic.AddUint64(&s.nextClientID, 1)
+	s.clients.Store(clientconn.clientID, clientconn)
 	atomic.AddInt32(&s.clientNum, 1)
 
 	err = s.iniService(wg, f, clientconn)
 	if err != nil {
-		if _, ok := s.clients.LoadAndDelete(clientconn.name); ok {
+		if _, ok := s.clients.LoadAndDelete(clientconn.clientID); ok {
 			atomic.AddInt32(&s.clientNum, -1)
 		}
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "iniService fail"
 		clientconn.SendFrame(rf)
-		loggo.Error("processLogin iniService fail %s %s %s", clientconn.conn.Info(), f.LoginFrame.String(), err)
+		loggo.Error("processLogin iniService fail %s name=%s %s", clientconn.conn.Info(), clientconn.name, err)
 		return
 	}
 
@@ -298,8 +324,8 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 	rf.LoginRspFrame.EncryptType = agreeE
 	clientconn.SendFrame(rf)
 
-	loggo.Info("processLogin ok %s %s compress=%s encrypt=%s",
-		clientconn.conn.Info(), f.LoginFrame.String(),
+	loggo.Info("processLogin ok %s name=%s compress=%s encrypt=%s",
+		clientconn.conn.Info(), clientconn.name,
 		compressTypeName(agreeC), encryptTypeName(agreeE))
 }
 

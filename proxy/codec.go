@@ -1,12 +1,19 @@
 package proxy
 
 import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"strings"
 	"sync/atomic"
 
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
+	"golang.org/x/crypto/chacha20poly1305"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -19,10 +26,16 @@ const (
 
 	EncryptUnspecified = ENCRYPT_TYPE_ENCRYPT_UNSPECIFIED
 	EncryptNone        = ENCRYPT_TYPE_ENCRYPT_NONE
-	EncryptRC4         = ENCRYPT_TYPE_ENCRYPT_RC4
+	EncryptAESGCM      = ENCRYPT_TYPE_ENCRYPT_AES_GCM
+	EncryptChaCha20    = ENCRYPT_TYPE_ENCRYPT_CHACHA20
+
+	authChallengeLen = 32
+	aeadNonceSize    = 12
+	aeadOverhead     = aeadNonceSize + 16 // nonce + Poly1305/GCM tag
 )
 
-// FrameCodec holds per-session compression/encryption settings applied to DATA frames.
+// FrameCodec holds per-session compression/encryption settings.
+// AEAD types seal the entire protobuf on the wire (including LOGIN).
 type FrameCodec struct {
 	CompressThreshold int
 	CompressType      COMPRESS_TYPE
@@ -37,7 +50,7 @@ func defaultFrameCodec(cfg *Config) FrameCodec {
 	}
 	et := cfg.EncryptType
 	if et == EncryptUnspecified {
-		et = EncryptRC4
+		et = EncryptChaCha20
 	}
 	if cfg.Compress <= 0 {
 		ct = CompressNone
@@ -82,8 +95,10 @@ func parseEncryptType(s string) (ENCRYPT_TYPE, error) {
 		return EncryptUnspecified, nil
 	case "none", "off", "0":
 		return EncryptNone, nil
-	case "rc4":
-		return EncryptRC4, nil
+	case "aes-gcm", "aesgcm", "aes":
+		return EncryptAESGCM, nil
+	case "chacha20", "chacha20-poly1305", "chacha":
+		return EncryptChaCha20, nil
 	default:
 		return EncryptUnspecified, errors.New("unsupported encrypt type: " + s)
 	}
@@ -106,8 +121,10 @@ func encryptTypeName(t ENCRYPT_TYPE) string {
 	switch t {
 	case EncryptNone:
 		return "none"
-	case EncryptRC4:
-		return "rc4"
+	case EncryptAESGCM:
+		return "aes-gcm"
+	case EncryptChaCha20:
+		return "chacha20"
 	default:
 		return "unspecified"
 	}
@@ -122,9 +139,18 @@ func effectiveCompressType(t COMPRESS_TYPE) COMPRESS_TYPE {
 
 func effectiveEncryptType(t ENCRYPT_TYPE) ENCRYPT_TYPE {
 	if t == EncryptUnspecified {
-		return EncryptRC4
+		return EncryptChaCha20
 	}
 	return t
+}
+
+func isAEADEncrypt(t ENCRYPT_TYPE) bool {
+	switch effectiveEncryptType(t) {
+	case EncryptAESGCM, EncryptChaCha20:
+		return true
+	default:
+		return false
+	}
 }
 
 func supportedCompressType(t COMPRESS_TYPE) bool {
@@ -138,7 +164,7 @@ func supportedCompressType(t COMPRESS_TYPE) bool {
 
 func supportedEncryptType(t ENCRYPT_TYPE) bool {
 	switch effectiveEncryptType(t) {
-	case EncryptNone, EncryptRC4:
+	case EncryptNone, EncryptAESGCM, EncryptChaCha20:
 		return true
 	default:
 		return false
@@ -199,18 +225,47 @@ func decompressPayload(t COMPRESS_TYPE, src []byte) ([]byte, error) {
 	}
 }
 
-func encryptPayload(t ENCRYPT_TYPE, key string, src []byte) ([]byte, error) {
+func deriveAEADKey(key string) []byte {
+	sum := sha256.Sum256([]byte(key))
+	return sum[:]
+}
+
+func newAEAD(t ENCRYPT_TYPE, key string) (cipher.AEAD, error) {
+	k := deriveAEADKey(key)
 	switch effectiveEncryptType(t) {
-	case EncryptNone:
-		return src, nil
-	case EncryptRC4:
-		if key == "" {
-			return src, nil
+	case EncryptAESGCM:
+		block, err := aes.NewCipher(k)
+		if err != nil {
+			return nil, err
 		}
-		return common.Rc4(key, src)
+		return cipher.NewGCM(block)
+	case EncryptChaCha20:
+		return chacha20poly1305.New(k)
 	default:
-		return nil, errors.New("unsupported encrypt type")
+		return nil, errors.New("not an AEAD encrypt type")
 	}
+}
+
+func makeAuthChallenge() ([]byte, error) {
+	b := make([]byte, authChallengeLen)
+	if _, err := rand.Read(b); err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func computeAuthProof(authKey string, challenge []byte) []byte {
+	mac := hmac.New(sha256.New, []byte(authKey))
+	mac.Write(challenge)
+	return mac.Sum(nil)
+}
+
+func verifyAuthProof(authKey string, challenge, proof []byte) bool {
+	if len(challenge) == 0 || len(proof) == 0 {
+		return false
+	}
+	expected := computeAuthProof(authKey, challenge)
+	return hmac.Equal(expected, proof)
 }
 
 func (p *ProxyConn) setCodec(c FrameCodec) {
@@ -219,6 +274,19 @@ func (p *ProxyConn) setCodec(c FrameCodec) {
 	atomic.StoreInt32(&p.compressThreshold, int32(c.CompressThreshold))
 	p.mu.Lock()
 	p.encryptKey = c.EncryptKey
+	p.aead = nil
+	if c.EncryptKey != "" && isAEADEncrypt(c.EncryptType) {
+		aead, err := newAEAD(c.EncryptType, c.EncryptKey)
+		if err == nil {
+			p.aead = aead
+			if _, err := rand.Read(p.noncePrefix[:]); err != nil {
+				p.aead = nil
+			}
+			atomic.StoreUint64(&p.nonceCounter, 0)
+		} else {
+			loggo.Error("setCodec AEAD init fail: %s", err.Error())
+		}
+	}
 	p.mu.Unlock()
 }
 
@@ -232,6 +300,58 @@ func (p *ProxyConn) getCodec() FrameCodec {
 		EncryptKey:        key,
 		EncryptType:       ENCRYPT_TYPE(atomic.LoadInt32(&p.encryptType)),
 	}
+}
+
+func (p *ProxyConn) nextNonce() ([]byte, error) {
+	n := make([]byte, aeadNonceSize)
+	p.mu.RLock()
+	copy(n[:4], p.noncePrefix[:])
+	p.mu.RUnlock()
+	ctr := atomic.AddUint64(&p.nonceCounter, 1)
+	binary.BigEndian.PutUint64(n[4:], ctr)
+	return n, nil
+}
+
+// sealWire AEAD-seals a marshaled protobuf when using AES-GCM/ChaCha20.
+// NONE returns plaintext unchanged.
+func (p *ProxyConn) sealWire(plain []byte) ([]byte, error) {
+	codec := p.getCodec()
+	if !isAEADEncrypt(codec.EncryptType) || codec.EncryptKey == "" {
+		return plain, nil
+	}
+	p.mu.RLock()
+	aead := p.aead
+	p.mu.RUnlock()
+	if aead == nil {
+		return nil, errors.New("AEAD not initialized")
+	}
+	nonce, err := p.nextNonce()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]byte, 0, len(nonce)+len(plain)+aead.Overhead())
+	out = append(out, nonce...)
+	out = aead.Seal(out, nonce, plain, nil)
+	return out, nil
+}
+
+// openWire AEAD-opens a wire blob when using AES-GCM/ChaCha20.
+func (p *ProxyConn) openWire(blob []byte) ([]byte, error) {
+	codec := p.getCodec()
+	if !isAEADEncrypt(codec.EncryptType) || codec.EncryptKey == "" {
+		return blob, nil
+	}
+	p.mu.RLock()
+	aead := p.aead
+	p.mu.RUnlock()
+	if aead == nil {
+		return nil, errors.New("AEAD not initialized")
+	}
+	if len(blob) < aeadNonceSize+aead.Overhead() {
+		return nil, errors.New("AEAD blob too short")
+	}
+	nonce := blob[:aeadNonceSize]
+	return aead.Open(nil, nonce, blob[aeadNonceSize:], nil)
 }
 
 func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
@@ -261,18 +381,6 @@ func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
 		}
 	}
 
-	if f.Type == FRAME_TYPE_DATA && codec.EncryptType != EncryptNone && codec.EncryptKey != "" {
-		newb, err := encryptPayload(codec.EncryptType, codec.EncryptKey, f.DataFrame.Data)
-		if err != nil {
-			return nil, err
-		}
-		if loggo.IsDebug() {
-			loggo.Debug("MarshalSrpFrame Encrypt(%s) from %s %s",
-				encryptTypeName(codec.EncryptType), common.GetCrc32(f.DataFrame.Data), common.GetCrc32(newb))
-		}
-		f.DataFrame.Data = newb
-	}
-
 	mb, err := proto.Marshal(f)
 	if err != nil {
 		return nil, err
@@ -290,18 +398,6 @@ func UnmarshalSrpFrame(b []byte, codec FrameCodec) (*ProxyFrame, error) {
 	err = checkProxyFame(f)
 	if err != nil {
 		return nil, err
-	}
-
-	if f.Type == FRAME_TYPE_DATA && codec.EncryptType != EncryptNone && codec.EncryptKey != "" {
-		newb, err := encryptPayload(codec.EncryptType, codec.EncryptKey, f.DataFrame.Data)
-		if err != nil {
-			return nil, err
-		}
-		if loggo.IsDebug() {
-			loggo.Debug("UnmarshalSrpFrame Encrypt(%s) from %s %s",
-				encryptTypeName(codec.EncryptType), common.GetCrc32(f.DataFrame.Data), common.GetCrc32(newb))
-		}
-		f.DataFrame.Data = newb
 	}
 
 	if f.Type == FRAME_TYPE_DATA && f.DataFrame.Compress {
