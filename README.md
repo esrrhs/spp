@@ -24,7 +24,8 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   * SOCKS5 Forward Proxy (with optional username/password auth)
   * SOCKS5 Reverse Proxy
   * Shadowsocks SIP003 Plugin support ([spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin))
-* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing **one** main channel to the server.
+* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing one logical session to the server.
+* **Multi-Path Underlay**: Client can open multiple main pipes (e.g. `-proto tcp -server host:8888 -proto rudp -server host:8889`). Traffic prefers the highest-throughput path; unhealthy pipes are greyed out, probed, and re-enabled when they recover.
 * **Security**:
   * Whole-frame AEAD by default: ChaCha20-Poly1305 (or AES-GCM)
   * Login via HMAC-SHA256 challenge-response (`-key`); no plaintext password on the wire
@@ -72,6 +73,20 @@ Both sides must use the **same** `-key` (auth) and `-encrypt` (wire crypto). Cho
 
 Optional: `-name` is only a log tag (not used for auth).  
 Encryption off: omit `-encrypt` or set it empty. Auth (`-key`) is always required.
+
+* **Multi-path** (TCP + RUDP underlays; traffic prefers the faster path):
+  ```bash
+  ./spp -type server \
+    -proto tcp -listen :8888 \
+    -proto rudp -listen :8889 \
+    -key 'your-auth-key' -encrypt 'your-encrypt-key'
+
+  ./spp -type proxy_client \
+    -proto tcp -server www.server.com:8888 \
+    -proto rudp -server www.server.com:8889 \
+    -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
+    -key 'your-auth-key' -encrypt 'your-encrypt-key'
+  ```
 
 ### 3. Using Configuration Files
 
