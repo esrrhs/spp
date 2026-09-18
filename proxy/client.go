@@ -242,6 +242,8 @@ func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch
 			} else {
 				f = ff.(*ProxyFrame)
 			}
+		case <-ctrlrecvch.Done():
+			exit = true
 		default:
 		}
 
@@ -254,6 +256,8 @@ func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch
 					break
 				}
 				f = ff.(*ProxyFrame)
+			case <-ctrlrecvch.Done():
+				exit = true
 			default:
 				select {
 				case ff := <-ctrlrecvch.Ch():
@@ -268,6 +272,10 @@ func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch
 						break
 					}
 					f = ff.(*ProxyFrame)
+				case <-ctrlrecvch.Done():
+					exit = true
+				case <-recvch.Done():
+					exit = true
 				}
 			}
 		}

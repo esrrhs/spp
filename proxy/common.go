@@ -442,8 +442,10 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 	bs := make([]byte, 4)
 
 	var ctrlCh <-chan any
+	var ctrlDone <-chan struct{}
 	if ctrlsendch != nil {
 		ctrlCh = ctrlsendch.Ch()
+		ctrlDone = ctrlsendch.Done()
 	}
 
 	for !isExit(wg) {
@@ -470,6 +472,8 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 				} else {
 					f = ff.(*ProxyFrame)
 				}
+			case <-ctrlDone:
+				exit = true
 			default:
 			}
 
@@ -482,6 +486,8 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 						break
 					}
 					f = ff.(*ProxyFrame)
+				case <-ctrlDone:
+					exit = true
 				default:
 					select {
 					case ff := <-ctrlCh:
@@ -496,6 +502,10 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 							break
 						}
 						f = ff.(*ProxyFrame)
+					case <-ctrlDone:
+						exit = true
+					case <-sendch.Done():
+						exit = true
 					case <-time.After(time.Second):
 						break
 					}
@@ -620,7 +630,12 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
 	for !isExit(wg) {
-		ff := <-sendch.Ch()
+		var ff interface{}
+		select {
+		case ff = <-sendch.Ch():
+		case <-sendch.Done():
+			ff = nil
+		}
 		if ff == nil {
 			break
 		}
@@ -830,7 +845,12 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
 
 	for !isExit(wg) {
-		ff := <-recvch.Ch()
+		var ff interface{}
+		select {
+		case ff = <-recvch.Ch():
+		case <-recvch.Done():
+			ff = nil
+		}
 		if ff == nil {
 			break
 		}
