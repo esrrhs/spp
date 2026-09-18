@@ -17,8 +17,9 @@ type Outputer struct {
 	father     *ProxyConn
 	fwg        *thread.Group
 
-	conn  network.Conn
-	sonny sync.Map
+	conn     network.Conn
+	sonny    sync.Map
+	sonnyNum int32 // atomic; tracks entries in sonny
 
 	ss bool
 }
@@ -201,6 +202,7 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 		loggo.Error("Outputer processOpenFrame LoadOrStore fail %s %s", targetAddr, id)
 		return
 	}
+	atomic.AddInt32(&o.sonnyNum, 1)
 
 	sendch := newMsgChannel(o.config.ConnBuffer)
 	recvch := newMsgChannel(o.config.ConnBuffer)
@@ -224,7 +226,9 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 
 	if !o.open(proxyConn, targetAddr) {
 		proxyConn.CloseChannels()
-		o.sonny.Delete(proxyConn.id)
+		if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
+			atomic.AddInt32(&o.sonnyNum, -1)
+		}
 		return nil
 	}
 
@@ -258,7 +262,9 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 	})
 
 	wg.Wait()
-	o.sonny.Delete(proxyConn.id)
+	if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
+		atomic.AddInt32(&o.sonnyNum, -1)
+	}
 
 	closeRemoteConn(proxyConn, o.father)
 
@@ -268,10 +274,9 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) err
 }
 
 func (o *Outputer) sonnySize() int {
-	size := 0
-	o.sonny.Range(func(key, value interface{}) bool {
-		size++
-		return true
-	})
-	return size
+	n := atomic.LoadInt32(&o.sonnyNum)
+	if n < 0 {
+		return 0
+	}
+	return int(n)
 }

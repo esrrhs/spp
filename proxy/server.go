@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strconv"
 	"sync"
+	"sync/atomic"
 
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
@@ -29,6 +30,7 @@ type Server struct {
 	listenConns []network.Conn
 	wg          *thread.Group
 	clients     sync.Map
+	clientNum   int32 // atomic; tracks entries in clients
 }
 
 func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, error) {
@@ -115,12 +117,11 @@ func (s *Server) listen(index int) error {
 }
 
 func (s *Server) clientSize() int {
-	size := 0
-	s.clients.Range(func(key, value interface{}) bool {
-		size++
-		return true
-	})
-	return size
+	n := atomic.LoadInt32(&s.clientNum)
+	if n < 0 {
+		return 0
+	}
+	return int(n)
 }
 
 func (s *Server) serveClient(clientconn *ClientConn) error {
@@ -176,7 +177,9 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 
 	wg.Wait()
 	if clientconn.isEstablished() {
-		s.clients.Delete(clientconn.name)
+		if _, ok := s.clients.LoadAndDelete(clientconn.name); ok {
+			atomic.AddInt32(&s.clientNum, -1)
+		}
 	}
 
 	loggo.Info("serveClient close client %s", clientconn.conn.Info())
@@ -306,10 +309,13 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 		loggo.Error("processLogin fail %s has login before %s %s", f.LoginFrame.Name, clientconn.conn.Info(), f.LoginFrame.String())
 		return
 	}
+	atomic.AddInt32(&s.clientNum, 1)
 
 	err := s.iniService(wg, f, clientconn)
 	if err != nil {
-		s.clients.Delete(clientconn.name)
+		if _, ok := s.clients.LoadAndDelete(clientconn.name); ok {
+			atomic.AddInt32(&s.clientNum, -1)
+		}
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "iniService fail"
 		clientconn.SendFrame(rf)

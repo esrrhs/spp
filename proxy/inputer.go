@@ -21,6 +21,7 @@ type Inputer struct {
 
 	listenconn network.Conn
 	sonny      sync.Map
+	sonnyNum   int32 // atomic; tracks entries in sonny
 }
 
 func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string) (*Inputer, error) {
@@ -269,6 +270,7 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 		proxyConn.conn.Close()
 		return nil
 	}
+	atomic.AddInt32(&i.sonnyNum, 1)
 
 	sendch := newMsgChannel(i.config.ConnBuffer)
 	recvch := newMsgChannel(i.config.ConnBuffer)
@@ -309,7 +311,9 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	})
 
 	wg.Wait()
-	i.sonny.Delete(proxyConn.id)
+	if _, ok := i.sonny.LoadAndDelete(proxyConn.id); ok {
+		atomic.AddInt32(&i.sonnyNum, -1)
+	}
 
 	closeRemoteConn(proxyConn, i.father)
 
@@ -330,10 +334,9 @@ func (i *Inputer) openConn(proxyConn *ProxyConn, targetAddr string) {
 }
 
 func (i *Inputer) sonnySize() int {
-	size := 0
-	i.sonny.Range(func(key, value interface{}) bool {
-		size++
-		return true
-	})
-	return size
+	n := atomic.LoadInt32(&i.sonnyNum)
+	if n < 0 {
+		return 0
+	}
+	return int(n)
 }
