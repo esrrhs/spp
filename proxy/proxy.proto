@@ -41,7 +41,15 @@ enum ENCRYPT_TYPE {
     ENCRYPT_CHACHA20 = 4;
 }
 
+message LoginService {
+    PROXY_PROTO proxyproto = 1;
+    string fromaddr = 2;
+    string toaddr = 3;
+}
+
 message LoginFrame {
+    // Deprecated single-service fields; prefer services. Kept for one-slot convenience:
+    // if services is empty, these define the only service.
     PROXY_PROTO proxyproto = 1;
     CLIENT_TYPE clienttype = 2;
     string fromaddr = 3;
@@ -53,6 +61,8 @@ message LoginFrame {
     ENCRYPT_TYPE encrypt_type = 8;
     // HMAC-SHA256(auth_key, challenge) from AUTH_CHALLENGE.
     bytes auth_proof = 9;
+    // All local/remote services multiplexed on this main channel.
+    repeated LoginService services = 10;
 }
 
 message LoginRspFrame {
@@ -78,6 +88,10 @@ message PongFrame {
 message OpenConnFrame {
     string id = 1;
     string toaddr = 2;
+    // Proxy protocol for the sonny dial/accept side.
+    PROXY_PROTO proxyproto = 3;
+    // Index into LoginFrame.services; pairs Inputer[i] with Outputer[i].
+    int32 service_index = 4;
 }
 
 message OpenConnRspFrame {

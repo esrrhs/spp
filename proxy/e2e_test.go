@@ -121,6 +121,62 @@ func TestE2E_TCP_ForwardProxy(t *testing.T) {
 	}
 }
 
+func TestE2E_TCP_MultiFromaddr_OneMainChannel(t *testing.T) {
+	echo1, stop1 := startTCPEchoServer(t)
+	defer stop1()
+	echo2, stop2 := startTCPEchoServer(t)
+	defer stop2()
+
+	serverPort := getFreePort(t)
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", serverPort)
+
+	clientPort1 := getFreePort(t)
+	clientPort2 := getFreePort(t)
+	clientAddr1 := fmt.Sprintf("127.0.0.1:%d", clientPort1)
+	clientAddr2 := fmt.Sprintf("127.0.0.1:%d", clientPort2)
+
+	cfg := DefaultConfig()
+	cfg.Key = "test-e2e-multi-svc"
+	cfg.Encrypt = "test-e2e-multi-enc"
+
+	server, err := NewServer(cfg, []string{"tcp"}, []string{serverAddr})
+	if err != nil {
+		t.Fatalf("NewServer failed: %v", err)
+	}
+	defer server.Close()
+
+	client, err := NewClient(cfg, "tcp", serverAddr, "multi", "PROXY",
+		[]string{"tcp", "tcp"},
+		[]string{clientAddr1, clientAddr2},
+		[]string{echo1, echo2})
+	if err != nil {
+		t.Fatalf("NewClient failed: %v", err)
+	}
+	defer client.Close()
+
+	for i, addr := range []string{clientAddr1, clientAddr2} {
+		conn, err := waitForPort(addr, 3*time.Second)
+		if err != nil {
+			t.Fatalf("Failed to dial client proxy port[%d] %s: %v", i, addr, err)
+		}
+		msg := []byte(fmt.Sprintf("multi-svc-%d", i))
+		conn.SetDeadline(time.Now().Add(3 * time.Second))
+		if _, err := conn.Write(msg); err != nil {
+			conn.Close()
+			t.Fatalf("write[%d]: %v", i, err)
+		}
+		reply := make([]byte, len(msg))
+		if _, err := io.ReadFull(conn, reply); err != nil {
+			conn.Close()
+			t.Fatalf("read[%d]: %v", i, err)
+		}
+		conn.Close()
+		if !bytes.Equal(reply, msg) {
+			t.Fatalf("mismatch[%d]: got %s want %s", i, reply, msg)
+		}
+	}
+}
+
 func TestE2E_TCP_ForwardProxy_LargeData(t *testing.T) {
 	echoAddr, stopEcho := startTCPEchoServer(t)
 	defer stopEcho()

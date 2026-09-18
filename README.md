@@ -24,7 +24,7 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   * SOCKS5 Forward Proxy (with optional username/password auth)
   * SOCKS5 Reverse Proxy
   * Shadowsocks SIP003 Plugin support ([spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin))
-* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP).
+* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing **one** main channel to the server.
 * **Security**:
   * Whole-frame AEAD by default: ChaCha20-Poly1305 (or AES-GCM)
   * Login via HMAC-SHA256 challenge-response (`-key`); no plaintext password on the wire

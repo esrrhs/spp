@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"errors"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -12,19 +13,20 @@ import (
 )
 
 type Inputer struct {
-	clienttype CLIENT_TYPE
-	config     *Config
-	proto      string
-	addr       string
-	father     *ProxyConn
-	fwg        *thread.Group
+	clienttype   CLIENT_TYPE
+	config       *Config
+	proto        string
+	addr         string
+	father       *ProxyConn
+	fwg          *thread.Group
+	serviceIndex int32
 
 	listenconn network.Conn
 	sonny      sync.Map
 	sonnyNum   int32 // atomic; tracks entries in sonny
 }
 
-func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string) (*Inputer, error) {
+func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string, serviceIndex int) (*Inputer, error) {
 	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
@@ -36,25 +38,26 @@ func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_T
 	}
 
 	input := &Inputer{
-		clienttype: clienttype,
-		config:     config,
-		proto:      proto,
-		addr:       addr,
-		father:     father,
-		fwg:        wg,
-		listenconn: listenconn,
+		clienttype:   clienttype,
+		config:       config,
+		proto:        proto,
+		addr:         addr,
+		father:       father,
+		fwg:          wg,
+		serviceIndex: int32(serviceIndex),
+		listenconn:   listenconn,
 	}
 
 	wg.Go("Inputer listen"+" "+targetAddr, func() error {
 		return input.listen(targetAddr)
 	})
 
-	loggo.Info("NewInputer ok %s", addr)
+	loggo.Info("NewInputer ok %s service=%d", addr, serviceIndex)
 
 	return input, nil
 }
 
-func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Inputer, error) {
+func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, serviceIndex int) (*Inputer, error) {
 	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
@@ -66,20 +69,21 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 	}
 
 	input := &Inputer{
-		clienttype: clienttype,
-		config:     config,
-		proto:      proto,
-		addr:       addr,
-		father:     father,
-		fwg:        wg,
-		listenconn: listenconn,
+		clienttype:   clienttype,
+		config:       config,
+		proto:        proto,
+		addr:         addr,
+		father:       father,
+		fwg:          wg,
+		serviceIndex: int32(serviceIndex),
+		listenconn:   listenconn,
 	}
 
 	wg.Go("Inputer listenSocks5"+" "+addr, func() error {
 		return input.listenSocks5()
 	})
 
-	loggo.Info("NewInputer ok %s", addr)
+	loggo.Info("NewInputer ok %s service=%d", addr, serviceIndex)
 
 	return input, nil
 }
@@ -322,15 +326,24 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	return nil
 }
 
+func (i *Inputer) hasSonny(id string) bool {
+	_, ok := i.sonny.Load(id)
+	return ok
+}
+
 func (i *Inputer) openConn(proxyConn *ProxyConn, targetAddr string) {
 	f := &ProxyFrame{}
 	f.Type = FRAME_TYPE_OPEN
 	f.OpenFrame = &OpenConnFrame{}
 	f.OpenFrame.Id = proxyConn.id
 	f.OpenFrame.Toaddr = targetAddr
+	f.OpenFrame.ServiceIndex = i.serviceIndex
+	if p, ok := PROXY_PROTO_value[strings.ToUpper(i.proto)]; ok {
+		f.OpenFrame.Proxyproto = PROXY_PROTO(p)
+	}
 
 	i.father.SendFrame(f)
-	loggo.Info("Inputer openConn %s %s", proxyConn.id, targetAddr)
+	loggo.Info("Inputer openConn %s %s proto=%s service=%d", proxyConn.id, targetAddr, i.proto, i.serviceIndex)
 }
 
 func (i *Inputer) sonnySize() int {

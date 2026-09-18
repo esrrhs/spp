@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -11,11 +12,12 @@ import (
 )
 
 type Outputer struct {
-	clienttype CLIENT_TYPE
-	config     *Config
-	proto      string
-	father     *ProxyConn
-	fwg        *thread.Group
+	clienttype   CLIENT_TYPE
+	config       *Config
+	proto        string
+	father       *ProxyConn
+	fwg          *thread.Group
+	serviceIndex int32
 
 	conn     network.Conn
 	sonny    sync.Map
@@ -24,43 +26,45 @@ type Outputer struct {
 	ss bool
 }
 
-func NewOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
+func NewOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, serviceIndex int) (*Outputer, error) {
 	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
 
 	output := &Outputer{
-		clienttype: clienttype,
-		config:     config,
-		conn:       conn,
-		proto:      proto,
-		father:     father,
-		fwg:        wg,
+		clienttype:   clienttype,
+		config:       config,
+		conn:         conn,
+		proto:        proto,
+		father:       father,
+		fwg:          wg,
+		serviceIndex: int32(serviceIndex),
 	}
 
-	loggo.Info("NewOutputer ok %s", proto)
+	loggo.Info("NewOutputer ok %s service=%d", proto, serviceIndex)
 
 	return output, nil
 }
 
-func NewSSOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn) (*Outputer, error) {
+func NewSSOutputer(wg *thread.Group, proto string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, serviceIndex int) (*Outputer, error) {
 	conn, err := network.NewConn(proto)
 	if conn == nil {
 		return nil, err
 	}
 
 	output := &Outputer{
-		clienttype: clienttype,
-		config:     config,
-		conn:       conn,
-		proto:      proto,
-		father:     father,
-		fwg:        wg,
-		ss:         true,
+		clienttype:   clienttype,
+		config:       config,
+		conn:         conn,
+		proto:        proto,
+		father:       father,
+		fwg:          wg,
+		serviceIndex: int32(serviceIndex),
+		ss:           true,
 	}
 
-	loggo.Info("NewSSOutputer ok %s", proto)
+	loggo.Info("NewSSOutputer ok %s service=%d", proto, serviceIndex)
 
 	return output, nil
 }
@@ -103,18 +107,26 @@ func (o *Outputer) processCloseFrame(f *ProxyFrame) {
 	sonny.SendSonnyClose(f)
 }
 
-func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string) bool {
+func (o *Outputer) hasSonny(id string) bool {
+	_, ok := o.sonny.Load(id)
+	return ok
+}
+
+func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string, dialProto string) bool {
 
 	id := proxyconn.id
+	if dialProto == "" {
+		dialProto = o.proto
+	}
 
-	loggo.Info("Outputer open start %s %s", id, targetAddr)
+	loggo.Info("Outputer open start %s %s proto=%s", id, targetAddr, dialProto)
 
 	rf := &ProxyFrame{}
 	rf.Type = FRAME_TYPE_OPENRSP
 	rf.OpenRspFrame = &OpenConnRspFrame{}
 	rf.OpenRspFrame.Id = id
 
-	c, err := network.NewConn(o.conn.Name())
+	c, err := network.NewConn(dialProto)
 	if err != nil {
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "NewConn fail " + targetAddr
@@ -166,6 +178,10 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 
 	id := f.OpenFrame.Id
 	targetAddr := f.OpenFrame.Toaddr
+	dialProto := o.proto
+	if name := f.OpenFrame.Proxyproto.String(); name != "" {
+		dialProto = strings.ToLower(name)
+	}
 
 	rf := &ProxyFrame{}
 	rf.Type = FRAME_TYPE_OPENRSP
@@ -213,18 +229,18 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	o.fwg.Go("Outputer processProxyConn"+" "+targetAddr, func() error {
 		atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, 1)
 		defer atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, -1)
-		return o.processProxyConn(proxyconn, targetAddr)
+		return o.processProxyConn(proxyconn, targetAddr, dialProto)
 	})
 }
 
-func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) error {
+func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dialProto string) error {
 
 	loggo.Info("Outputer processProxyConn start %s %s", proxyConn.id, targetAddr)
 
 	sendch := proxyConn.sendch
 	recvch := proxyConn.recvch
 
-	if !o.open(proxyConn, targetAddr) {
+	if !o.open(proxyConn, targetAddr, dialProto) {
 		proxyConn.CloseChannels()
 		if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
 			atomic.AddInt32(&o.sonnyNum, -1)
