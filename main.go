@@ -132,7 +132,7 @@ func main() {
 	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", network.SupportProtos()))
 	var listenaddrs listenAddrs
 	flag.Var(&listenaddrs, "listen", "server listen addr")
-	name := flag.String("name", "client", "client name")
+	name := flag.String("name", "", "optional client tag for logs; empty is fine")
 	server := flag.String("server", "", "server addr")
 	var fromaddr fromFlags
 	flag.Var(&fromaddr, "fromaddr", "from addr")
@@ -140,7 +140,7 @@ func main() {
 	flag.Var(&toaddr, "toaddr", "to addr")
 	key := flag.String("key", "123456", "verify key")
 	encrypt := flag.String("encrypt", "default", "encrypt key, empty means off")
-	encrypttype := flag.String("encrypttype", "rc4", "encrypt type: none/rc4")
+	encrypttype := flag.String("encrypttype", "chacha20", "encrypt type: none/aes-gcm/chacha20")
 	compress := flag.Int("compress", 128, "start compress size, 0 means off")
 	compresstype := flag.String("compresstype", "zstd", "compress type: none/zlib/zstd")
 	nolog := flag.Int("nolog", 0, "write log file")
@@ -369,7 +369,7 @@ func main() {
 		config.CompressType = proxy.CompressZstd
 	}
 	if et == proxy.EncryptUnspecified {
-		config.EncryptType = proxy.EncryptRC4
+		config.EncryptType = proxy.EncryptChaCha20
 	}
 
 	var s *proxy.Server

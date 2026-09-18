@@ -15,7 +15,7 @@ func testCodec(threshold int, key string) FrameCodec {
 		CompressThreshold: threshold,
 		CompressType:      CompressZstd,
 		EncryptKey:        key,
-		EncryptType:       EncryptRC4,
+		EncryptType:       EncryptChaCha20,
 	}
 	if threshold <= 0 {
 		c.CompressType = CompressNone
@@ -59,13 +59,13 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 			Type: FRAME_TYPE_LOGIN,
 			LoginFrame: &LoginFrame{
 				Name:         "test-client",
-				Key:          "secret",
+				AuthProof:    []byte("dummy-proof"),
 				Clienttype:   CLIENT_TYPE_PROXY,
 				Proxyproto:   PROXY_PROTO_TCP,
 				Fromaddr:     ":8080",
 				Toaddr:       ":9090",
 				CompressType: CompressZstd,
-				EncryptType:  EncryptRC4,
+				EncryptType:  EncryptChaCha20,
 			},
 		}
 		data, err := MarshalSrpFrame(f, codecKey)
@@ -79,7 +79,7 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 		if res.Type != FRAME_TYPE_LOGIN || res.LoginFrame == nil || res.LoginFrame.Name != "test-client" {
 			t.Errorf("LOGIN frame mismatch: %+v", res.LoginFrame)
 		}
-		if res.LoginFrame.CompressType != CompressZstd || res.LoginFrame.EncryptType != EncryptRC4 {
+		if res.LoginFrame.CompressType != CompressZstd || res.LoginFrame.EncryptType != EncryptChaCha20 {
 			t.Errorf("LOGIN codec fields mismatch: c=%v e=%v", res.LoginFrame.CompressType, res.LoginFrame.EncryptType)
 		}
 	}
@@ -92,7 +92,7 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 				Ret:          true,
 				Msg:          "login success",
 				CompressType: CompressZstd,
-				EncryptType:  EncryptRC4,
+				EncryptType:  EncryptChaCha20,
 			},
 		}
 		data, err := MarshalSrpFrame(f, codecKey)
@@ -290,6 +290,7 @@ func TestCheckProxyFrameErrors(t *testing.T) {
 		{Type: FRAME_TYPE_OPEN, OpenFrame: nil},
 		{Type: FRAME_TYPE_OPENRSP, OpenRspFrame: nil},
 		{Type: FRAME_TYPE_CLOSE, CloseFrame: nil},
+		{Type: FRAME_TYPE_AUTH_CHALLENGE, AuthChallengeFrame: nil},
 		{Type: FRAME_TYPE(999)}, // Invalid type
 	}
 
@@ -322,7 +323,7 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.CompressType != CompressZstd {
 		t.Errorf("unexpected CompressType: %v", cfg.CompressType)
 	}
-	if cfg.EncryptType != EncryptRC4 {
+	if cfg.EncryptType != EncryptChaCha20 {
 		t.Errorf("unexpected EncryptType: %v", cfg.EncryptType)
 	}
 	if cfg.MaxClient <= 0 || cfg.MaxSonny <= 0 {
@@ -333,7 +334,7 @@ func TestDefaultConfig(t *testing.T) {
 func TestNegotiateCodec(t *testing.T) {
 	cfg := DefaultConfig()
 	c, e, err := negotiateCodec(CompressUnspecified, EncryptUnspecified, cfg)
-	if err != nil || c != CompressZstd || e != EncryptRC4 {
+	if err != nil || c != CompressZstd || e != EncryptChaCha20 {
 		t.Fatalf("default negotiate: c=%v e=%v err=%v", c, e, err)
 	}
 	c, e, err = negotiateCodec(CompressZlib, EncryptNone, cfg)
@@ -341,9 +342,78 @@ func TestNegotiateCodec(t *testing.T) {
 		t.Fatalf("explicit negotiate: c=%v e=%v err=%v", c, e, err)
 	}
 	cfg.Compress = 0
-	c, e, err = negotiateCodec(CompressZstd, EncryptRC4, cfg)
-	if err != nil || c != CompressNone {
+	c, e, err = negotiateCodec(CompressZstd, EncryptAESGCM, cfg)
+	if err != nil || c != CompressNone || e != EncryptAESGCM {
 		t.Fatalf("compress off: c=%v e=%v err=%v", c, e, err)
+	}
+}
+
+func TestAuthProof(t *testing.T) {
+	ch, err := makeAuthChallenge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof := computeAuthProof("secret", ch)
+	if !verifyAuthProof("secret", ch, proof) {
+		t.Fatal("valid proof rejected")
+	}
+	if verifyAuthProof("wrong", ch, proof) {
+		t.Fatal("invalid key accepted")
+	}
+	bad := append([]byte(nil), proof[:len(proof)-1]...)
+	if verifyAuthProof("secret", ch, bad) {
+		t.Fatal("truncated proof accepted")
+	}
+}
+
+func TestAEADWireRoundTrip(t *testing.T) {
+	for _, et := range []ENCRYPT_TYPE{EncryptChaCha20, EncryptAESGCM} {
+		p := &ProxyConn{}
+		p.setCodec(FrameCodec{
+			CompressType: CompressNone,
+			EncryptType:  et,
+			EncryptKey:   "wire-secret",
+		})
+		raw := []byte("hello aead frame body " + encryptTypeName(et))
+		sealed, err := p.sealWire(raw)
+		if err != nil {
+			t.Fatalf("%s seal: %v", encryptTypeName(et), err)
+		}
+		if string(sealed) == string(raw) {
+			t.Fatalf("%s seal did not encrypt", encryptTypeName(et))
+		}
+		plain, err := p.openWire(sealed)
+		if err != nil {
+			t.Fatalf("%s open: %v", encryptTypeName(et), err)
+		}
+		if string(plain) != string(raw) {
+			t.Fatalf("%s roundtrip mismatch", encryptTypeName(et))
+		}
+	}
+}
+
+func TestMarshalAEADNoInnerEncrypt(t *testing.T) {
+	raw := bytes.Repeat([]byte("payload "), 8)
+	f := &ProxyFrame{
+		Type: FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{
+			Id:   "1",
+			Data: append([]byte(nil), raw...),
+			Crc:  common.GetCrc32(raw),
+		},
+	}
+	codec := FrameCodec{CompressThreshold: 0, CompressType: CompressNone, EncryptType: EncryptChaCha20, EncryptKey: "k"}
+	data, err := MarshalSrpFrame(f, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// DATA bytes inside protobuf should remain plaintext; AEAD is wire-level.
+	res, err := UnmarshalSrpFrame(data, codec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(res.DataFrame.Data, raw) {
+		t.Fatal("unexpected data mutation")
 	}
 }
 

@@ -155,6 +155,7 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 
 	serverconn.sendq = sendq
 	serverconn.recvq = recvq
+	serverconn.setCodec(defaultFrameCodec(c.config))
 
 	wg := thread.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
 		loggo.Info("group start exit %s", serverconn.conn.Info())
@@ -168,8 +169,6 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 		serverconn.CloseChannels()
 		loggo.Info("group end exit %s", serverconn.conn.Info())
 	})
-
-	c.login(index, serverconn)
 
 	var pingflag int32
 	var pongflag int32
@@ -204,9 +203,8 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	return nil
 }
 
-func (c *Client) login(index int, serverconn *ServerConn) {
-	codec := defaultFrameCodec(c.config)
-	serverconn.setCodec(codec)
+func (c *Client) loginWithChallenge(index int, serverconn *ServerConn, challenge []byte) {
+	codec := serverconn.getCodec()
 
 	f := &ProxyFrame{}
 	f.Type = FRAME_TYPE_LOGIN
@@ -217,15 +215,21 @@ func (c *Client) login(index int, serverconn *ServerConn) {
 	if len(c.toaddr) > 0 {
 		f.LoginFrame.Toaddr = c.toaddr[index]
 	}
-	f.LoginFrame.Name = c.name + "_" + strconv.Itoa(index)
-	f.LoginFrame.Key = c.config.Key
+	if c.name != "" {
+		if len(c.proxyproto) > 1 {
+			f.LoginFrame.Name = c.name + "_" + strconv.Itoa(index)
+		} else {
+			f.LoginFrame.Name = c.name
+		}
+	}
+	f.LoginFrame.AuthProof = computeAuthProof(c.config.Key, challenge)
 	f.LoginFrame.CompressType = codec.CompressType
 	f.LoginFrame.EncryptType = codec.EncryptType
 
 	serverconn.SendFrame(f)
 
-	loggo.Info("start login %d %s %s compress=%s encrypt=%s",
-		index, c.server, f.LoginFrame.String(),
+	loggo.Info("start login %d %s name=%s compress=%s encrypt=%s (hmac)",
+		index, c.server, f.LoginFrame.Name,
 		compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
 }
 
@@ -244,6 +248,9 @@ func (c *Client) process(wg *thread.Group, index int, recvq *prioQueue, serverco
 		f := v.(*ProxyFrame)
 
 		switch f.Type {
+		case FRAME_TYPE_AUTH_CHALLENGE:
+			c.loginWithChallenge(index, serverconn, f.AuthChallengeFrame.Challenge)
+
 		case FRAME_TYPE_LOGINRSP:
 			c.processLoginRsp(wg, index, f, serverconn)
 

@@ -30,11 +30,15 @@ enum COMPRESS_TYPE {
     COMPRESS_ZSTD = 3;
 }
 
-// ENCRYPT_TYPE selects payload encryption. UNSPECIFIED means "use peer default".
+// ENCRYPT_TYPE selects frame encryption.
+// NONE: no wire encryption.
+// AES_GCM/CHACHA20: AEAD seals the whole protobuf on the wire (incl. LOGIN).
 enum ENCRYPT_TYPE {
     ENCRYPT_UNSPECIFIED = 0;
     ENCRYPT_NONE = 1;
-    ENCRYPT_RC4 = 2;
+    reserved 2; // was ENCRYPT_RC4
+    ENCRYPT_AES_GCM = 3;
+    ENCRYPT_CHACHA20 = 4;
 }
 
 message LoginFrame {
@@ -42,10 +46,13 @@ message LoginFrame {
     CLIENT_TYPE clienttype = 2;
     string fromaddr = 3;
     string toaddr = 4;
+    // Optional client tag for logging/display only; not unique, not used for auth.
     string name = 5;
-    string key = 6;
+    reserved 6; // was plaintext key
     COMPRESS_TYPE compress_type = 7;
     ENCRYPT_TYPE encrypt_type = 8;
+    // HMAC-SHA256(auth_key, challenge) from AUTH_CHALLENGE.
+    bytes auth_proof = 9;
 }
 
 message LoginRspFrame {
@@ -54,6 +61,10 @@ message LoginRspFrame {
     // Agreed session codecs (echoed by server on success).
     COMPRESS_TYPE compress_type = 3;
     ENCRYPT_TYPE encrypt_type = 4;
+}
+
+message AuthChallengeFrame {
+    bytes challenge = 1;
 }
 
 message PingFrame {
@@ -98,6 +109,7 @@ enum FRAME_TYPE {
     OPEN = 5;
     OPENRSP = 6;
     CLOSE = 7;
+    AUTH_CHALLENGE = 8;
 }
 
 message ProxyFrame {
@@ -110,4 +122,5 @@ message ProxyFrame {
     OpenConnFrame openFrame = 7;
     OpenConnRspFrame openRspFrame = 8;
     CloseFrame closeFrame = 9;
+    AuthChallengeFrame authChallengeFrame = 10;
 }
