@@ -92,7 +92,9 @@ type ConfigFile struct {
 	ToAddr      []string `json:"toaddr"`
 	Key         string   `json:"key"`
 	Encrypt     *string  `json:"encrypt"`
+	EncryptType *string  `json:"encrypttype"`
 	Compress    *int     `json:"compress"`
+	CompressType *string `json:"compresstype"`
 	NoLog       *int     `json:"nolog"`
 	NoPrint     *int     `json:"noprint"`
 	LogLevel    string   `json:"loglevel"`
@@ -138,7 +140,9 @@ func main() {
 	flag.Var(&toaddr, "toaddr", "to addr")
 	key := flag.String("key", "123456", "verify key")
 	encrypt := flag.String("encrypt", "default", "encrypt key, empty means off")
+	encrypttype := flag.String("encrypttype", "rc4", "encrypt type: none/rc4")
 	compress := flag.Int("compress", 128, "start compress size, 0 means off")
+	compresstype := flag.String("compresstype", "zstd", "compress type: none/zlib/zstd")
 	nolog := flag.Int("nolog", 0, "write log file")
 	noprint := flag.Int("noprint", 0, "print stdout")
 	loglevel := flag.String("loglevel", "info", "log level")
@@ -200,8 +204,14 @@ func main() {
 		if !cliSet["encrypt"] && fileCfg.Encrypt != nil {
 			*encrypt = *fileCfg.Encrypt
 		}
+		if !cliSet["encrypttype"] && fileCfg.EncryptType != nil {
+			*encrypttype = *fileCfg.EncryptType
+		}
 		if !cliSet["compress"] && fileCfg.Compress != nil {
 			*compress = *fileCfg.Compress
+		}
+		if !cliSet["compresstype"] && fileCfg.CompressType != nil {
+			*compresstype = *fileCfg.CompressType
 		}
 		if !cliSet["nolog"] && fileCfg.NoLog != nil {
 			*nolog = *fileCfg.NoLog
@@ -342,6 +352,25 @@ func main() {
 	config.Password = *password
 	config.MaxClient = *maxclient
 	config.MaxSonny = *maxconn
+
+	ct, err := proxy.ParseCompressType(*compresstype)
+	if err != nil {
+		loggo.Error("invalid -compresstype: %s", err.Error())
+		return
+	}
+	et, err := proxy.ParseEncryptType(*encrypttype)
+	if err != nil {
+		loggo.Error("invalid -encrypttype: %s", err.Error())
+		return
+	}
+	config.CompressType = ct
+	config.EncryptType = et
+	if ct == proxy.CompressUnspecified {
+		config.CompressType = proxy.CompressZstd
+	}
+	if et == proxy.EncryptUnspecified {
+		config.EncryptType = proxy.EncryptRC4
+	}
 
 	var s *proxy.Server
 	var c *proxy.Client

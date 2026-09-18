@@ -10,6 +10,22 @@ import (
 	"github.com/esrrhs/gohome/network"
 )
 
+func testCodec(threshold int, key string) FrameCodec {
+	c := FrameCodec{
+		CompressThreshold: threshold,
+		CompressType:      CompressZstd,
+		EncryptKey:        key,
+		EncryptType:       EncryptRC4,
+	}
+	if threshold <= 0 {
+		c.CompressType = CompressNone
+	}
+	if key == "" {
+		c.EncryptType = EncryptNone
+	}
+	return c
+}
+
 func Test0001(t *testing.T) {
 	src := "aaabsfasasdfasfas3rdsfasfdhsafdshsafafafafaffasfsafa1111111111111111111111111111111111111111111111111111111111"
 	f := &ProxyFrame{}
@@ -17,12 +33,12 @@ func Test0001(t *testing.T) {
 	f.DataFrame = &DataFrame{}
 	f.DataFrame.Data = []byte(src)
 	fmt.Println(len(f.DataFrame.Data))
-	b, err := MarshalSrpFrame(f, 10, "123123")
+	b, err := MarshalSrpFrame(f, testCodec(10, "123123"))
 	if err != nil {
 		t.Error(err)
 	}
 	fmt.Println(len(f.DataFrame.Data))
-	ff, err := UnmarshalSrpFrame(b, "123123")
+	ff, err := UnmarshalSrpFrame(b, testCodec(10, "123123"))
 	if err != nil {
 		t.Error(err)
 	}
@@ -33,31 +49,38 @@ func Test0001(t *testing.T) {
 }
 
 func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
-	testKey := "test-secret-key"
+	codecKey := testCodec(0, "test-secret-key")
+	codecPlain := testCodec(0, "")
+	codecComp := testCodec(32, "encrypt-key")
 
 	// 1. FRAME_TYPE_LOGIN
 	{
 		f := &ProxyFrame{
 			Type: FRAME_TYPE_LOGIN,
 			LoginFrame: &LoginFrame{
-				Name:       "test-client",
-				Key:        "secret",
-				Clienttype: CLIENT_TYPE_PROXY,
-				Proxyproto: PROXY_PROTO_TCP,
-				Fromaddr:   ":8080",
-				Toaddr:     ":9090",
+				Name:         "test-client",
+				Key:          "secret",
+				Clienttype:   CLIENT_TYPE_PROXY,
+				Proxyproto:   PROXY_PROTO_TCP,
+				Fromaddr:     ":8080",
+				Toaddr:       ":9090",
+				CompressType: CompressZstd,
+				EncryptType:  EncryptRC4,
 			},
 		}
-		data, err := MarshalSrpFrame(f, 0, testKey)
+		data, err := MarshalSrpFrame(f, codecKey)
 		if err != nil {
 			t.Fatalf("Marshal LOGIN frame failed: %v", err)
 		}
-		res, err := UnmarshalSrpFrame(data, testKey)
+		res, err := UnmarshalSrpFrame(data, codecKey)
 		if err != nil {
 			t.Fatalf("Unmarshal LOGIN frame failed: %v", err)
 		}
 		if res.Type != FRAME_TYPE_LOGIN || res.LoginFrame == nil || res.LoginFrame.Name != "test-client" {
 			t.Errorf("LOGIN frame mismatch: %+v", res.LoginFrame)
+		}
+		if res.LoginFrame.CompressType != CompressZstd || res.LoginFrame.EncryptType != EncryptRC4 {
+			t.Errorf("LOGIN codec fields mismatch: c=%v e=%v", res.LoginFrame.CompressType, res.LoginFrame.EncryptType)
 		}
 	}
 
@@ -66,15 +89,17 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 		f := &ProxyFrame{
 			Type: FRAME_TYPE_LOGINRSP,
 			LoginRspFrame: &LoginRspFrame{
-				Ret: true,
-				Msg: "login success",
+				Ret:          true,
+				Msg:          "login success",
+				CompressType: CompressZstd,
+				EncryptType:  EncryptRC4,
 			},
 		}
-		data, err := MarshalSrpFrame(f, 0, testKey)
+		data, err := MarshalSrpFrame(f, codecKey)
 		if err != nil {
 			t.Fatalf("Marshal LOGINRSP frame failed: %v", err)
 		}
-		res, err := UnmarshalSrpFrame(data, testKey)
+		res, err := UnmarshalSrpFrame(data, codecKey)
 		if err != nil {
 			t.Fatalf("Unmarshal LOGINRSP frame failed: %v", err)
 		}
@@ -94,11 +119,11 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 				Crc:  common.GetCrc32(raw),
 			},
 		}
-		data, err := MarshalSrpFrame(f, 0, "")
+		data, err := MarshalSrpFrame(f, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal DATA frame failed: %v", err)
 		}
-		res, err := UnmarshalSrpFrame(data, "")
+		res, err := UnmarshalSrpFrame(data, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal DATA frame failed: %v", err)
 		}
@@ -118,16 +143,41 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 				Crc:  common.GetCrc32(raw),
 			},
 		}
-		data, err := MarshalSrpFrame(f, 32, "encrypt-key")
+		data, err := MarshalSrpFrame(f, codecComp)
 		if err != nil {
 			t.Fatalf("Marshal compressed/encrypted DATA frame failed: %v", err)
 		}
-		res, err := UnmarshalSrpFrame(data, "encrypt-key")
+		res, err := UnmarshalSrpFrame(data, codecComp)
 		if err != nil {
 			t.Fatalf("Unmarshal compressed/encrypted DATA frame failed: %v", err)
 		}
 		if !bytes.Equal(res.DataFrame.Data, raw) {
 			t.Errorf("DATA frame uncompressed content mismatch")
+		}
+	}
+
+	// 4b. zlib path
+	{
+		raw := bytes.Repeat([]byte("zlib compressible payload "), 30)
+		f := &ProxyFrame{
+			Type: FRAME_TYPE_DATA,
+			DataFrame: &DataFrame{
+				Id:   "conn-zlib",
+				Data: append([]byte(nil), raw...),
+				Crc:  common.GetCrc32(raw),
+			},
+		}
+		codec := FrameCodec{CompressThreshold: 16, CompressType: CompressZlib, EncryptType: EncryptNone}
+		data, err := MarshalSrpFrame(f, codec)
+		if err != nil {
+			t.Fatalf("Marshal zlib DATA failed: %v", err)
+		}
+		res, err := UnmarshalSrpFrame(data, codec)
+		if err != nil {
+			t.Fatalf("Unmarshal zlib DATA failed: %v", err)
+		}
+		if !bytes.Equal(res.DataFrame.Data, raw) {
+			t.Errorf("zlib DATA mismatch")
 		}
 	}
 
@@ -138,32 +188,32 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 			Type:      FRAME_TYPE_PING,
 			PingFrame: &PingFrame{Time: now},
 		}
-		data, err := MarshalSrpFrame(ping, 0, "")
+		data, err := MarshalSrpFrame(ping, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal PING failed: %v", err)
 		}
-		res, err := UnmarshalSrpFrame(data, "")
+		res, err := UnmarshalSrpFrame(data, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal PING failed: %v", err)
 		}
 		if res.Type != FRAME_TYPE_PING || res.PingFrame.Time != now {
-			t.Errorf("PING frame mismatch")
+			t.Errorf("PING mismatch")
 		}
 
 		pong := &ProxyFrame{
 			Type:      FRAME_TYPE_PONG,
 			PongFrame: &PongFrame{Time: now},
 		}
-		dataPong, err := MarshalSrpFrame(pong, 0, "")
+		dataPong, err := MarshalSrpFrame(pong, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal PONG failed: %v", err)
 		}
-		resPong, err := UnmarshalSrpFrame(dataPong, "")
+		resPong, err := UnmarshalSrpFrame(dataPong, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal PONG failed: %v", err)
 		}
 		if resPong.Type != FRAME_TYPE_PONG || resPong.PongFrame.Time != now {
-			t.Errorf("PONG frame mismatch")
+			t.Errorf("PONG mismatch")
 		}
 	}
 
@@ -172,40 +222,40 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 		open := &ProxyFrame{
 			Type: FRAME_TYPE_OPEN,
 			OpenFrame: &OpenConnFrame{
-				Id:     "session-123",
-				Toaddr: "127.0.0.1:80",
+				Id:     "id-1",
+				Toaddr: "1.2.3.4:80",
 			},
 		}
-		data, err := MarshalSrpFrame(open, 0, "")
+		data, err := MarshalSrpFrame(open, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal OPEN failed: %v", err)
 		}
-		resOpen, err := UnmarshalSrpFrame(data, "")
+		resOpen, err := UnmarshalSrpFrame(data, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal OPEN failed: %v", err)
 		}
-		if resOpen.OpenFrame.Id != "session-123" || resOpen.OpenFrame.Toaddr != "127.0.0.1:80" {
-			t.Errorf("OPEN frame mismatch")
+		if resOpen.OpenFrame.Id != "id-1" {
+			t.Errorf("OPEN mismatch")
 		}
 
 		openRsp := &ProxyFrame{
 			Type: FRAME_TYPE_OPENRSP,
 			OpenRspFrame: &OpenConnRspFrame{
-				Id:  "session-123",
+				Id:  "id-1",
 				Ret: true,
 				Msg: "ok",
 			},
 		}
-		dataRsp, err := MarshalSrpFrame(openRsp, 0, "")
+		dataRsp, err := MarshalSrpFrame(openRsp, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal OPENRSP failed: %v", err)
 		}
-		resRsp, err := UnmarshalSrpFrame(dataRsp, "")
+		resRsp, err := UnmarshalSrpFrame(dataRsp, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal OPENRSP failed: %v", err)
 		}
-		if !resRsp.OpenRspFrame.Ret || resRsp.OpenRspFrame.Id != "session-123" {
-			t.Errorf("OPENRSP frame mismatch")
+		if !resRsp.OpenRspFrame.Ret {
+			t.Errorf("OPENRSP mismatch")
 		}
 	}
 
@@ -213,24 +263,24 @@ func TestMarshalUnmarshalAllFrameTypes(t *testing.T) {
 	{
 		closeF := &ProxyFrame{
 			Type:       FRAME_TYPE_CLOSE,
-			CloseFrame: &CloseFrame{Id: "session-close-1"},
+			CloseFrame: &CloseFrame{Id: "id-close"},
 		}
-		data, err := MarshalSrpFrame(closeF, 0, "")
+		data, err := MarshalSrpFrame(closeF, codecPlain)
 		if err != nil {
 			t.Fatalf("Marshal CLOSE failed: %v", err)
 		}
-		resClose, err := UnmarshalSrpFrame(data, "")
+		resClose, err := UnmarshalSrpFrame(data, codecPlain)
 		if err != nil {
 			t.Fatalf("Unmarshal CLOSE failed: %v", err)
 		}
-		if resClose.CloseFrame.Id != "session-close-1" {
-			t.Errorf("CLOSE frame mismatch")
+		if resClose.CloseFrame.Id != "id-close" {
+			t.Errorf("CLOSE mismatch")
 		}
 	}
 }
 
 func TestCheckProxyFrameErrors(t *testing.T) {
-	// Frame with missing payload should return error
+	codec := testCodec(0, "")
 	tests := []*ProxyFrame{
 		{Type: FRAME_TYPE_LOGIN, LoginFrame: nil},
 		{Type: FRAME_TYPE_LOGINRSP, LoginRspFrame: nil},
@@ -246,9 +296,9 @@ func TestCheckProxyFrameErrors(t *testing.T) {
 	for i, f := range tests {
 		err := checkProxyFame(f)
 		if err == nil {
-			t.Errorf("case %d expected error, got nil", i)
+			t.Errorf("case %d expected check error", i)
 		}
-		_, err = MarshalSrpFrame(f, 0, "")
+		_, err = MarshalSrpFrame(f, codec)
 		if err == nil {
 			t.Errorf("MarshalSrpFrame case %d expected error, got nil", i)
 		}
@@ -269,8 +319,31 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Compress != 128 {
 		t.Errorf("unexpected Compress: %d", cfg.Compress)
 	}
+	if cfg.CompressType != CompressZstd {
+		t.Errorf("unexpected CompressType: %v", cfg.CompressType)
+	}
+	if cfg.EncryptType != EncryptRC4 {
+		t.Errorf("unexpected EncryptType: %v", cfg.EncryptType)
+	}
 	if cfg.MaxClient <= 0 || cfg.MaxSonny <= 0 {
 		t.Errorf("invalid default limits: client=%d, sonny=%d", cfg.MaxClient, cfg.MaxSonny)
+	}
+}
+
+func TestNegotiateCodec(t *testing.T) {
+	cfg := DefaultConfig()
+	c, e, err := negotiateCodec(CompressUnspecified, EncryptUnspecified, cfg)
+	if err != nil || c != CompressZstd || e != EncryptRC4 {
+		t.Fatalf("default negotiate: c=%v e=%v err=%v", c, e, err)
+	}
+	c, e, err = negotiateCodec(CompressZlib, EncryptNone, cfg)
+	if err != nil || c != CompressZlib || e != EncryptNone {
+		t.Fatalf("explicit negotiate: c=%v e=%v err=%v", c, e, err)
+	}
+	cfg.Compress = 0
+	c, e, err = negotiateCodec(CompressZstd, EncryptRC4, cfg)
+	if err != nil || c != CompressNone {
+		t.Fatalf("compress off: c=%v e=%v err=%v", c, e, err)
 	}
 }
 

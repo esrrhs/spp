@@ -22,6 +22,21 @@ enum CLIENT_TYPE {
     SS_PROXY = 4;
 }
 
+// COMPRESS_TYPE selects payload compression. UNSPECIFIED means "use peer default".
+enum COMPRESS_TYPE {
+    COMPRESS_UNSPECIFIED = 0;
+    COMPRESS_NONE = 1;
+    COMPRESS_ZLIB = 2;
+    COMPRESS_ZSTD = 3;
+}
+
+// ENCRYPT_TYPE selects payload encryption. UNSPECIFIED means "use peer default".
+enum ENCRYPT_TYPE {
+    ENCRYPT_UNSPECIFIED = 0;
+    ENCRYPT_NONE = 1;
+    ENCRYPT_RC4 = 2;
+}
+
 message LoginFrame {
     PROXY_PROTO proxyproto = 1;
     CLIENT_TYPE clienttype = 2;
@@ -29,11 +44,16 @@ message LoginFrame {
     string toaddr = 4;
     string name = 5;
     string key = 6;
+    COMPRESS_TYPE compress_type = 7;
+    ENCRYPT_TYPE encrypt_type = 8;
 }
 
 message LoginRspFrame {
     bool ret = 1;
     string msg = 2;
+    // Agreed session codecs (echoed by server on success).
+    COMPRESS_TYPE compress_type = 3;
+    ENCRYPT_TYPE encrypt_type = 4;
 }
 
 message PingFrame {
@@ -65,6 +85,8 @@ message DataFrame {
     string crc = 3;
     bytes data = 4;
     int32 index = 5;
+    // Set when compress=true so the peer knows which decoder to use.
+    COMPRESS_TYPE compress_type = 6;
 }
 
 enum FRAME_TYPE {

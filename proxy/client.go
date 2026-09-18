@@ -176,11 +176,11 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	var pongtime int64
 
 	wg.Go("Client recvFrom"+" "+serverconn.conn.Info(), func() error {
-		return recvFrom(wg, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize, c.config.Encrypt)
+		return recvFrom(wg, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize)
 	})
 
 	wg.Go("Client sendTo"+" "+serverconn.conn.Info(), func() error {
-		return sendTo(wg, sendq, serverconn.conn, c.config.Compress, c.config.MaxMsgSize, c.config.Encrypt, &pingflag, &pongflag, &pongtime)
+		return sendTo(wg, sendq, &serverconn.ProxyConn, serverconn.conn, c.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Client checkPingActive"+" "+serverconn.conn.Info(), func() error {
@@ -205,6 +205,9 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 }
 
 func (c *Client) login(index int, serverconn *ServerConn) {
+	codec := defaultFrameCodec(c.config)
+	serverconn.setCodec(codec)
+
 	f := &ProxyFrame{}
 	f.Type = FRAME_TYPE_LOGIN
 	f.LoginFrame = &LoginFrame{}
@@ -216,10 +219,14 @@ func (c *Client) login(index int, serverconn *ServerConn) {
 	}
 	f.LoginFrame.Name = c.name + "_" + strconv.Itoa(index)
 	f.LoginFrame.Key = c.config.Key
+	f.LoginFrame.CompressType = codec.CompressType
+	f.LoginFrame.EncryptType = codec.EncryptType
 
 	serverconn.SendFrame(f)
 
-	loggo.Info("start login %d %s %s", index, c.server, f.LoginFrame.String())
+	loggo.Info("start login %d %s %s compress=%s encrypt=%s",
+		index, c.server, f.LoginFrame.String(),
+		compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
 }
 
 func (c *Client) process(wg *thread.Group, index int, recvq *prioQueue, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
@@ -270,7 +277,17 @@ func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, ser
 		return
 	}
 
-	loggo.Info("processLoginRsp ok %s", c.server)
+	codec := serverconn.getCodec()
+	if f.LoginRspFrame.CompressType != CompressUnspecified {
+		codec.CompressType = f.LoginRspFrame.CompressType
+	}
+	if f.LoginRspFrame.EncryptType != EncryptUnspecified {
+		codec.EncryptType = f.LoginRspFrame.EncryptType
+	}
+	serverconn.setCodec(codec)
+
+	loggo.Info("processLoginRsp ok %s compress=%s encrypt=%s",
+		c.server, compressTypeName(codec.CompressType), encryptTypeName(codec.EncryptType))
 
 	err := c.iniService(wg, index, serverconn)
 	if err != nil {
