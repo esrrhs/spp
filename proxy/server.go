@@ -43,6 +43,9 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 	if config == nil {
 		config = DefaultConfig()
 	}
+	if err := ValidateConfig(config); err != nil {
+		return nil, err
+	}
 
 	var listenConns []network.Conn
 

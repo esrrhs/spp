@@ -6,7 +6,7 @@ import (
 )
 
 var (
-	Version   = "0.10.0"
+	Version   = "0.10.1"
 	GitCommit = "dev"
 	BuildTime = "unknown"
 	GoVersion = runtime.Version()

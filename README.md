@@ -25,8 +25,12 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   * SOCKS5 Reverse Proxy
   * Shadowsocks SIP003 Plugin support ([spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin))
 * **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP).
-* **Security & Performance**: ChaCha20-Poly1305 / AES-GCM whole-frame AEAD (default), HMAC challenge-response login, zstd compression, and low CPU/memory overhead.
-* **Ease of Operation**: Supports command-line flags or JSON configuration files, with graceful shutdown and health ping monitoring.
+* **Security**:
+  * Whole-frame AEAD by default: ChaCha20-Poly1305 (or AES-GCM)
+  * Login via HMAC-SHA256 challenge-response (`-key`); no plaintext password on the wire
+  * No weak built-in secrets — `-key` is required; `-encrypt` empty disables encryption
+* **Performance**: zstd compression (threshold 128B by default), priority queue on the control channel, low CPU/memory overhead.
+* **Ease of Operation**: Command-line flags or JSON config, graceful shutdown, and health ping monitoring.
 
 ---
 
@@ -44,28 +48,37 @@ go build -o spp .
 
 ### 2. Basic Example
 
+Both sides must use the **same** `-key` (auth) and `-encrypt` (wire crypto). Choose strong values; there are no defaults.
+
 * **Start Server** (listening on TCP port 8888):
   ```bash
-  ./spp -type server -proto tcp -listen :8888
+  ./spp -type server -proto tcp -listen :8888 \
+    -key 'your-auth-key' -encrypt 'your-encrypt-key'
   ```
 
 * **Start Client** (forward local port 8080 to target port 8080 via the server):
   ```bash
-  ./spp -name "client1" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp
+  ./spp -type proxy_client -server www.server.com:8888 \
+    -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
+    -key 'your-auth-key' -encrypt 'your-encrypt-key'
   ```
 
 * **Start SOCKS5 Proxy** (open SOCKS5 proxy on local port 8080):
   ```bash
-  ./spp -name "socks5" -type socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
+  ./spp -type socks5_client -server www.server.com:8888 \
+    -fromaddr :8080 -proxyproto tcp \
+    -key 'your-auth-key' -encrypt 'your-encrypt-key'
   ```
+
+Optional: `-name` is only a log tag (not used for auth).  
+Encryption off: omit `-encrypt` or set it empty. Auth (`-key`) is always required.
 
 ### 3. Using Configuration Files
 
-```bash
-# Start server with config
-./spp -config config_server.json
+Edit `config_server.json` / `config_client.json` and replace the placeholder secrets, then:
 
-# Start client with config
+```bash
+./spp -config config_server.json
 ./spp -config config_client.json
 ```
 

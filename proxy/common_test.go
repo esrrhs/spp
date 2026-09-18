@@ -306,6 +306,30 @@ func TestCheckProxyFrameErrors(t *testing.T) {
 	}
 }
 
+func TestValidateConfig(t *testing.T) {
+	cfg := DefaultConfig()
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("empty key should fail")
+	}
+	cfg.Key = "123456"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("weak key should fail")
+	}
+	cfg.Key = "strong-auth-key"
+	cfg.Encrypt = "default"
+	if err := ValidateConfig(cfg); err == nil {
+		t.Fatal("weak encrypt should fail")
+	}
+	cfg.Encrypt = ""
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("empty encrypt should be ok: %v", err)
+	}
+	cfg.Encrypt = "strong-encrypt-key"
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("strong secrets should be ok: %v", err)
+	}
+}
+
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	if cfg == nil {
@@ -314,8 +338,11 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.MaxMsgSize != 1024*1024 {
 		t.Errorf("unexpected MaxMsgSize: %d", cfg.MaxMsgSize)
 	}
-	if cfg.Key != "123456" {
-		t.Errorf("unexpected default Key: %s", cfg.Key)
+	if cfg.Key != "" {
+		t.Errorf("unexpected default Key: %q (want empty)", cfg.Key)
+	}
+	if cfg.Encrypt != "" {
+		t.Errorf("unexpected default Encrypt: %q (want empty)", cfg.Encrypt)
 	}
 	if cfg.Compress != 128 {
 		t.Errorf("unexpected Compress: %d", cfg.Compress)
@@ -333,6 +360,7 @@ func TestDefaultConfig(t *testing.T) {
 
 func TestNegotiateCodec(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.Encrypt = "wire-key"
 	c, e, err := negotiateCodec(CompressUnspecified, EncryptUnspecified, cfg)
 	if err != nil || c != CompressZstd || e != EncryptChaCha20 {
 		t.Fatalf("default negotiate: c=%v e=%v err=%v", c, e, err)
@@ -345,6 +373,11 @@ func TestNegotiateCodec(t *testing.T) {
 	c, e, err = negotiateCodec(CompressZstd, EncryptAESGCM, cfg)
 	if err != nil || c != CompressNone || e != EncryptAESGCM {
 		t.Fatalf("compress off: c=%v e=%v err=%v", c, e, err)
+	}
+	cfg.Encrypt = ""
+	_, e, err = negotiateCodec(CompressUnspecified, EncryptChaCha20, cfg)
+	if err != nil || e != EncryptNone {
+		t.Fatalf("empty encrypt forces none: e=%v err=%v", e, err)
 	}
 }
 

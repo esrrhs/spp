@@ -37,6 +37,9 @@ func NewClient(config *Config, serverproto string, server string, name string, c
 	if config == nil {
 		config = DefaultConfig()
 	}
+	if err := ValidateConfig(config); err != nil {
+		return nil, err
+	}
 
 	cn, err := network.NewConn(serverproto)
 	if cn == nil {
