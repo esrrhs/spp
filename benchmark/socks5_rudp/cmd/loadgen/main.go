@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/binary"
 	"flag"
 	"fmt"
@@ -67,24 +69,36 @@ func socks5Dial(proxy, target string, timeout time.Duration) (net.Conn, error) {
 	return conn, nil
 }
 
+func fillPattern(b []byte, seed byte) {
+	for i := range b {
+		b[i] = byte(i) + seed
+	}
+}
+
 func main() {
 	proxy := flag.String("proxy", "127.0.0.1:1080", "socks5 proxy")
 	target := flag.String("target", "127.0.0.1:9999", "backend target")
 	conns := flag.Int("c", 32, "concurrent workers")
 	duration := flag.Duration("d", 30*time.Second, "test duration")
-	chunk := flag.Int("bs", 32*1024, "write chunk size (upload/download) or req body (short)")
-	mode := flag.String("mode", "upload", "upload|download|bidi|short")
+	chunk := flag.Int("bs", 32*1024, "write chunk size (upload/download) or short echo size")
+	reqSize := flag.Int("req", 512, "page-mode request body size")
+	pageSize := flag.Int("pagesize", 100*1024, "page-mode expected response body size")
+	mode := flag.String("mode", "upload", "upload|download|bidi|short|page")
 	flag.Parse()
 
 	payload := make([]byte, *chunk)
-	for i := range payload {
-		payload[i] = byte(i)
-	}
+	fillPattern(payload, 0)
 	if *mode == "short" && *chunk > 8*1024 {
 		payload = payload[:4*1024]
 	}
 
-	var totalUp, totalDown, opens, errs, latSumNs, latCount int64
+	pageReq := make([]byte, *reqSize)
+	fillPattern(pageReq, 0xA1)
+	wantPage := make([]byte, *pageSize)
+	fillPattern(wantPage, 0x5A)
+	wantSum := sha256.Sum256(wantPage)
+
+	var totalUp, totalDown, opens, errs, bad, latSumNs, latCount int64
 	deadline := time.Now().Add(*duration)
 	var wg sync.WaitGroup
 
@@ -113,16 +127,72 @@ func main() {
 					if n > 0 {
 						atomic.AddInt64(&totalUp, int64(n))
 					}
-					if err == nil {
-						rn, rerr := io.ReadFull(c, buf[:len(payload)])
-						if rn > 0 {
-							atomic.AddInt64(&totalDown, int64(rn))
-						}
-						if rerr != nil && rerr != io.EOF && rerr != io.ErrUnexpectedEOF {
-							atomic.AddInt64(&errs, 1)
-						}
-					} else {
+					if err != nil {
 						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					got := make([]byte, len(payload))
+					rn, rerr := io.ReadFull(c, got)
+					if rn > 0 {
+						atomic.AddInt64(&totalDown, int64(rn))
+					}
+					if rerr != nil {
+						atomic.AddInt64(&errs, 1)
+					} else if !bytes.Equal(got, payload) {
+						atomic.AddInt64(&bad, 1)
+					}
+					c.Close()
+					atomic.AddInt64(&opens, 1)
+					atomic.AddInt64(&latSumNs, time.Since(start).Nanoseconds())
+					atomic.AddInt64(&latCount, 1)
+
+				case "page":
+					// Webpage-like: small request, larger response; verify length+sha256+bytes.
+					c.SetDeadline(time.Now().Add(10 * time.Second))
+					var hdr [4]byte
+					binary.BigEndian.PutUint32(hdr[:], uint32(len(pageReq)))
+					if _, err := c.Write(hdr[:]); err != nil {
+						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					wn, err := c.Write(pageReq)
+					atomic.AddInt64(&totalUp, int64(4+wn))
+					if err != nil {
+						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					if _, err := io.ReadFull(c, hdr[:]); err != nil {
+						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					gotLen := binary.BigEndian.Uint32(hdr[:])
+					var sum [32]byte
+					if _, err := io.ReadFull(c, sum[:]); err != nil {
+						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					if int(gotLen) != len(wantPage) {
+						atomic.AddInt64(&bad, 1)
+						io.Copy(io.Discard, c)
+						c.Close()
+						continue
+					}
+					got := make([]byte, gotLen)
+					rn, rerr := io.ReadFull(c, got)
+					atomic.AddInt64(&totalDown, int64(4+32+rn))
+					if rerr != nil {
+						atomic.AddInt64(&errs, 1)
+						c.Close()
+						continue
+					}
+					gotSum := sha256.Sum256(got)
+					if sum != wantSum || gotSum != wantSum || !bytes.Equal(got, wantPage) {
+						atomic.AddInt64(&bad, 1)
 					}
 					c.Close()
 					atomic.AddInt64(&opens, 1)
@@ -205,13 +275,14 @@ func main() {
 			if n := atomic.LoadInt64(&latCount); n > 0 {
 				avgLat = float64(atomic.LoadInt64(&latSumNs)) / float64(n) / 1e6
 			}
-			fmt.Printf("t=%.0fs opens/s=%.0f total_opens=%d up=%.2fMB/s down=%.2fMB/s errs=%d avg_lat=%.1fms\n",
+			fmt.Printf("t=%.0fs opens/s=%.0f total_opens=%d up=%.2fMB/s down=%.2fMB/s errs=%d bad=%d avg_lat=%.1fms\n",
 				now.Sub(startAll).Seconds(),
 				float64(op-lastOpens)/dt,
 				op,
 				float64(up-lastUp)/dt/1e6,
 				float64(down-lastDown)/dt/1e6,
 				atomic.LoadInt64(&errs),
+				atomic.LoadInt64(&bad),
 				avgLat,
 			)
 			lastUp, lastDown, lastOpens, lastT = up, down, op, now
@@ -225,9 +296,15 @@ func main() {
 	if n := atomic.LoadInt64(&latCount); n > 0 {
 		avgLat = float64(atomic.LoadInt64(&latSumNs)) / float64(n) / 1e6
 	}
-	fmt.Printf("DONE elapsed=%.1fs total_opens=%d opens/s=%.0f avg_up=%.2fMB/s avg_down=%.2fMB/s errs=%d avg_lat=%.1fms\n",
+	up := atomic.LoadInt64(&totalUp)
+	down := atomic.LoadInt64(&totalDown)
+	fmt.Printf("DONE elapsed=%.1fs total_opens=%d opens/s=%.0f avg_up=%.2fMB/s avg_down=%.2fMB/s errs=%d bad=%d avg_lat=%.1fms\n",
 		elapsed, op, float64(op)/elapsed,
-		float64(atomic.LoadInt64(&totalUp))/elapsed/1e6,
-		float64(atomic.LoadInt64(&totalDown))/elapsed/1e6,
-		atomic.LoadInt64(&errs), avgLat)
+		float64(up)/elapsed/1e6,
+		float64(down)/elapsed/1e6,
+		atomic.LoadInt64(&errs), atomic.LoadInt64(&bad), avgLat)
+	if op > 0 {
+		fmt.Printf("INTEGRITY opens=%d bad=%d per_open_up=%.0fB per_open_down=%.0fB\n",
+			op, atomic.LoadInt64(&bad), float64(up)/float64(op), float64(down)/float64(op))
+	}
 }
