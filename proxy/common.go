@@ -14,28 +14,29 @@ import (
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/gohome/network"
 	"github.com/esrrhs/gohome/thread"
-	"google.golang.org/protobuf/proto"
 )
 
 type Config struct {
-	MaxMsgSize                int    // 消息最大长度
-	MainBuffer                int    // 主通道buffer最大长度
-	ConnBuffer                int    // 每个conn buffer最大长度
-	EstablishedTimeout        int    // 主通道登录超时
-	PingInter                 int    // 主通道ping间隔
-	PingTimeoutInter          int    // 主通道ping超时间隔
-	ConnTimeout               int    // 每个conn的不活跃超时时间
-	ConnectTimeout            int    // 每个conn的连接超时
-	Key                       string // 连接密码
-	Encrypt                   string // 加密密钥
-	Compress                  int    // 压缩设置
-	ShowPing                  bool   // 是否显示ping
-	Username                  string // 登录用户名
-	Password                  string // 登录密码
-	MaxClient                 int    // 最大客户端数目
-	MaxSonny                  int    // 最大连接数目
-	MainWriteChannelTimeoutMs int    // 主通道转发消息超时
-	Congestion                string // 拥塞算法
+	MaxMsgSize                int          // 消息最大长度
+	MainBuffer                int          // 主通道buffer最大长度
+	ConnBuffer                int          // 每个conn buffer最大长度
+	EstablishedTimeout        int          // 主通道登录超时
+	PingInter                 int          // 主通道ping间隔
+	PingTimeoutInter          int          // 主通道ping超时间隔
+	ConnTimeout               int          // 每个conn的不活跃超时时间
+	ConnectTimeout            int          // 每个conn的连接超时
+	Key                       string       // 连接密码
+	Encrypt                   string       // 加密密钥，空表示关闭加密
+	EncryptType               ENCRYPT_TYPE // 加密算法，默认 RC4
+	Compress                  int          // 压缩阈值，0 表示关闭
+	CompressType              COMPRESS_TYPE // 压缩算法，默认 ZSTD
+	ShowPing                  bool         // 是否显示ping
+	Username                  string       // 登录用户名
+	Password                  string       // 登录密码
+	MaxClient                 int          // 最大客户端数目
+	MaxSonny                  int          // 最大连接数目
+	MainWriteChannelTimeoutMs int          // 主通道转发消息超时
+	Congestion                string       // 拥塞算法
 }
 
 func DefaultConfig() *Config {
@@ -50,7 +51,9 @@ func DefaultConfig() *Config {
 		ConnectTimeout:            10,
 		Key:                       "123456",
 		Encrypt:                   "default",
+		EncryptType:               EncryptRC4,
 		Compress:                  128,
+		CompressType:              CompressZstd,
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
@@ -70,14 +73,18 @@ type ProxyConn struct {
 	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
 	sendch *msgChannel
 	recvch *msgChannel
-	actived   int32
-	pinged    int32
-	sentBytes int64
-	id        string
-	needclose int32 // atomic bool
-	mu        sync.RWMutex
-	isClosed  bool
-	closeOnce sync.Once
+	actived           int32
+	pinged            int32
+	sentBytes         int64
+	id                string
+	needclose         int32 // atomic bool
+	compressType      int32 // COMPRESS_TYPE
+	encryptType       int32 // ENCRYPT_TYPE
+	compressThreshold int32
+	encryptKey        string // guarded by mu
+	mu                sync.RWMutex
+	isClosed          bool
+	closeOnce         sync.Once
 }
 
 func (p *ProxyConn) closeConn() {
@@ -317,88 +324,11 @@ func isExit(wg *thread.Group) bool {
 	}
 }
 
-func MarshalSrpFrame(f *ProxyFrame, compress int, encrpyt string) ([]byte, error) {
-
-	err := checkProxyFame(f)
-	if err != nil {
-		return nil, err
-	}
-
-	if f.Type == FRAME_TYPE_DATA && compress > 0 && len(f.DataFrame.Data) > compress && !f.DataFrame.Compress {
-		newb := common.CompressDataZstd(f.DataFrame.Data)
-		if len(newb) < len(f.DataFrame.Data) {
-			if loggo.IsDebug() {
-				loggo.Debug("MarshalSrpFrame Compress from %d %d", len(f.DataFrame.Data), len(newb))
-			}
-			atomic.AddInt64(&gState.SendCompSaveSize, int64(len(f.DataFrame.Data)-len(newb)))
-			f.DataFrame.Data = newb
-			f.DataFrame.Compress = true
-		}
-	}
-
-	if f.Type == FRAME_TYPE_DATA && encrpyt != "" {
-		newb, err := common.Rc4(encrpyt, f.DataFrame.Data)
-		if err != nil {
-			return nil, err
-		}
-		if loggo.IsDebug() {
-			loggo.Debug("MarshalSrpFrame Rc4 from %s %s", common.GetCrc32(f.DataFrame.Data), common.GetCrc32(newb))
-		}
-		f.DataFrame.Data = newb
-	}
-
-	mb, err := proto.Marshal(f)
-	if err != nil {
-		return nil, err
-	}
-	return mb, err
-}
-
-func UnmarshalSrpFrame(b []byte, encrpyt string) (*ProxyFrame, error) {
-
-	f := &ProxyFrame{}
-	err := proto.Unmarshal(b, f)
-	if err != nil {
-		return nil, err
-	}
-
-	err = checkProxyFame(f)
-	if err != nil {
-		return nil, err
-	}
-
-	if f.Type == FRAME_TYPE_DATA && encrpyt != "" {
-		newb, err := common.Rc4(encrpyt, f.DataFrame.Data)
-		if err != nil {
-			return nil, err
-		}
-		if loggo.IsDebug() {
-			loggo.Debug("UnmarshalSrpFrame Rc4 from %s %s", common.GetCrc32(f.DataFrame.Data), common.GetCrc32(newb))
-		}
-		f.DataFrame.Data = newb
-	}
-
-	if f.Type == FRAME_TYPE_DATA && f.DataFrame.Compress {
-		newb, err := common.DeCompressDataZstd(f.DataFrame.Data)
-		if err != nil {
-			return nil, err
-		}
-		if loggo.IsDebug() {
-			loggo.Debug("UnmarshalSrpFrame Compress from %d %d", len(f.DataFrame.Data), len(newb))
-		}
-		atomic.AddInt64(&gState.RecvCompSaveSize, int64(len(newb)-len(f.DataFrame.Data)))
-		f.DataFrame.Data = newb
-		f.DataFrame.Compress = false
-	}
-
-	return f, nil
-}
-
 const (
 	MAX_PROTO_PACK_SIZE = 100
 )
 
-func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int, encrypt string) error {
+func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.RecvThread, -1)
@@ -432,7 +362,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			return err
 		}
 
-		f, err := UnmarshalSrpFrame(ds[0:msglen], encrypt)
+		f, err := UnmarshalSrpFrame(ds[0:msglen], proxyconn.getCodec())
 		if err != nil {
 			loggo.Error("recvFrom UnmarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
 			return err
@@ -462,7 +392,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 	return nil
 }
 
-func sendTo(wg *thread.Group, sendq *prioQueue, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
+func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int, pingflag *int32, pongflag *int32, pongtime *int64) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
@@ -504,7 +434,7 @@ func sendTo(wg *thread.Group, sendq *prioQueue, conn network.Conn, compress int,
 			}
 		}
 
-		mb, err := MarshalSrpFrame(f, compress, encrypt)
+		mb, err := MarshalSrpFrame(f, proxyconn.getCodec())
 		if err != nil {
 			loggo.Error("sendTo MarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
 			return err

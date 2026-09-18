@@ -134,6 +134,7 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 
 	clientconn.sendq = sendq
 	clientconn.recvq = recvq
+	clientconn.setCodec(defaultFrameCodec(s.config))
 
 	wg := thread.NewGroup("Server serveClient"+" "+clientconn.conn.Info(), s.wg, func() {
 		loggo.Info("group start exit %s", clientconn.conn.Info())
@@ -153,11 +154,11 @@ func (s *Server) serveClient(clientconn *ClientConn) error {
 	var pongtime int64
 
 	wg.Go("Server recvFrom"+" "+clientconn.conn.Info(), func() error {
-		return recvFrom(wg, &clientconn.ProxyConn, clientconn.conn, s.config.MaxMsgSize, s.config.Encrypt)
+		return recvFrom(wg, &clientconn.ProxyConn, clientconn.conn, s.config.MaxMsgSize)
 	})
 
 	wg.Go("Server sendTo"+" "+clientconn.conn.Info(), func() error {
-		return sendTo(wg, sendq, clientconn.conn, s.config.Compress, s.config.MaxMsgSize, s.config.Encrypt, &pingflag, &pongflag, &pongtime)
+		return sendTo(wg, sendq, &clientconn.ProxyConn, clientconn.conn, s.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Server checkPingActive"+" "+clientconn.conn.Info(), func() error {
@@ -246,6 +247,19 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 		return
 	}
 
+	agreeC, agreeE, err := negotiateCodec(f.LoginFrame.CompressType, f.LoginFrame.EncryptType, s.config)
+	if err != nil {
+		rf.LoginRspFrame.Ret = false
+		rf.LoginRspFrame.Msg = err.Error()
+		clientconn.SendFrame(rf)
+		loggo.Error("processLogin codec negotiate fail %s %s", clientconn.conn.Info(), err.Error())
+		return
+	}
+	codec := defaultFrameCodec(s.config)
+	codec.CompressType = agreeC
+	codec.EncryptType = agreeE
+	clientconn.setCodec(codec)
+
 	if clientconn.isEstablished() {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "has established before"
@@ -264,7 +278,7 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 	}
 	atomic.AddInt32(&s.clientNum, 1)
 
-	err := s.iniService(wg, f, clientconn)
+	err = s.iniService(wg, f, clientconn)
 	if err != nil {
 		if _, ok := s.clients.LoadAndDelete(clientconn.name); ok {
 			atomic.AddInt32(&s.clientNum, -1)
@@ -280,9 +294,13 @@ func (s *Server) processLogin(wg *thread.Group, f *ProxyFrame, clientconn *Clien
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
+	rf.LoginRspFrame.CompressType = agreeC
+	rf.LoginRspFrame.EncryptType = agreeE
 	clientconn.SendFrame(rf)
 
-	loggo.Info("processLogin ok %s %s", clientconn.conn.Info(), f.LoginFrame.String())
+	loggo.Info("processLogin ok %s %s compress=%s encrypt=%s",
+		clientconn.conn.Info(), f.LoginFrame.String(),
+		compressTypeName(agreeC), encryptTypeName(agreeE))
 }
 
 func (s *Server) iniService(wg *thread.Group, f *ProxyFrame, clientConn *ClientConn) error {
