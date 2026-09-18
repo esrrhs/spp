@@ -150,15 +150,11 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 
 	loggo.Info("useServer %s", serverconn.conn.Info())
 
-	sendch := newMsgChannel(c.config.MainBuffer)
-	recvch := newMsgChannel(c.config.MainBuffer)
-	ctrlsendch := newMsgChannel(c.config.MainBuffer)
-	ctrlrecvch := newMsgChannel(c.config.MainBuffer)
+	sendq := newPrioQueue(c.config.MainBuffer)
+	recvq := newPrioQueue(c.config.MainBuffer)
 
-	serverconn.sendch = sendch
-	serverconn.recvch = recvch
-	serverconn.ctrlsendch = ctrlsendch
-	serverconn.ctrlrecvch = ctrlrecvch
+	serverconn.sendq = sendq
+	serverconn.recvq = recvq
 
 	wg := thread.NewGroup("Client useServer"+" "+serverconn.conn.Info(), c.wg, func() {
 		loggo.Info("group start exit %s", serverconn.conn.Info())
@@ -184,11 +180,11 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	})
 
 	wg.Go("Client sendTo"+" "+serverconn.conn.Info(), func() error {
-		return sendTo(wg, sendch, ctrlsendch, serverconn.conn, c.config.Compress, c.config.MaxMsgSize, c.config.Encrypt, &pingflag, &pongflag, &pongtime)
+		return sendTo(wg, sendq, serverconn.conn, c.config.Compress, c.config.MaxMsgSize, c.config.Encrypt, &pingflag, &pongflag, &pongtime)
 	})
 
 	wg.Go("Client checkPingActive"+" "+serverconn.conn.Info(), func() error {
-		return checkPingActive(wg, sendch, recvch, &serverconn.ProxyConn, c.config.EstablishedTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
+		return checkPingActive(wg, &serverconn.ProxyConn, c.config.EstablishedTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
 	})
 
 	wg.Go("Client checkNeedClose"+" "+serverconn.conn.Info(), func() error {
@@ -196,7 +192,7 @@ func (c *Client) useServer(index int, serverconn *ServerConn) error {
 	})
 
 	wg.Go("Client process"+" "+serverconn.conn.Info(), func() error {
-		return c.process(wg, index, sendch, recvch, ctrlsendch, ctrlrecvch, serverconn, &pongflag, &pongtime)
+		return c.process(wg, index, recvq, serverconn, &pongflag, &pongtime)
 	})
 
 	wg.Wait()
@@ -226,73 +222,29 @@ func (c *Client) login(index int, serverconn *ServerConn) {
 	loggo.Info("start login %d %s %s", index, c.server, f.LoginFrame.String())
 }
 
-func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch *msgChannel, ctrlsendch *msgChannel, ctrlrecvch *msgChannel, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
+func (c *Client) process(wg *thread.Group, index int, recvq *prioQueue, serverconn *ServerConn, pongflag *int32, pongtime *int64) error {
 
 	loggo.Info("process start %s", serverconn.conn.Info())
 
 	for !isExit(wg) {
-		var f *ProxyFrame
-		exit := false
-
-		// 1. Strict priority check on control frames
-		select {
-		case ff := <-ctrlrecvch.Ch():
-			if ff == nil {
-				exit = true
-			} else {
-				f = ff.(*ProxyFrame)
+		v, closed, ok := recvq.PopWait(time.Second)
+		if !ok {
+			if closed {
+				break
 			}
-		case <-ctrlrecvch.Done():
-			exit = true
-		default:
+			continue
 		}
-
-		// 2. If no control frame was ready, wait on either (ctrl prioritized)
-		if f == nil && !exit {
-			select {
-			case ff := <-ctrlrecvch.Ch():
-				if ff == nil {
-					exit = true
-					break
-				}
-				f = ff.(*ProxyFrame)
-			case <-ctrlrecvch.Done():
-				exit = true
-			default:
-				select {
-				case ff := <-ctrlrecvch.Ch():
-					if ff == nil {
-						exit = true
-						break
-					}
-					f = ff.(*ProxyFrame)
-				case ff := <-recvch.Ch():
-					if ff == nil {
-						exit = true
-						break
-					}
-					f = ff.(*ProxyFrame)
-				case <-ctrlrecvch.Done():
-					exit = true
-				case <-recvch.Done():
-					exit = true
-				}
-			}
-		}
-
-		if exit || f == nil {
-			break
-		}
+		f := v.(*ProxyFrame)
 
 		switch f.Type {
 		case FRAME_TYPE_LOGINRSP:
-			c.processLoginRsp(wg, index, f, sendch, serverconn)
+			c.processLoginRsp(wg, index, f, serverconn)
 
 		case FRAME_TYPE_PING:
-			processPing(f, sendch, &serverconn.ProxyConn, pongflag, pongtime)
+			processPing(f, &serverconn.ProxyConn, pongflag, pongtime)
 
 		case FRAME_TYPE_PONG:
-			processPong(f, sendch, &serverconn.ProxyConn, c.config.ShowPing)
+			processPong(f, &serverconn.ProxyConn, c.config.ShowPing)
 
 		case FRAME_TYPE_DATA:
 			c.processData(f, serverconn)
@@ -311,7 +263,7 @@ func (c *Client) process(wg *thread.Group, index int, sendch *msgChannel, recvch
 	return nil
 }
 
-func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, sendch *msgChannel, serverconn *ServerConn) {
+func (c *Client) processLoginRsp(wg *thread.Group, index int, f *ProxyFrame, serverconn *ServerConn) {
 	if !f.LoginRspFrame.Ret {
 		serverconn.setNeedClose()
 		loggo.Error("processLoginRsp fail %s %s", c.server, f.LoginRspFrame.Msg)

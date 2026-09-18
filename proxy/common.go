@@ -64,18 +64,20 @@ func DefaultConfig() *Config {
 type ProxyConn struct {
 	conn        network.Conn
 	established int32 // atomic bool
-	sendch      *msgChannel // *ProxyFrame (data frames)
-	recvch      *msgChannel // *ProxyFrame (data frames)
-	ctrlsendch  *msgChannel // *ProxyFrame (control frames + initial interactive DATA)
-	ctrlrecvch  *msgChannel // *ProxyFrame (high-priority control frames)
-	actived     int32
-	pinged      int32
-	sentBytes   int64
-	id          string
-	needclose   int32 // atomic bool
-	mu          sync.RWMutex
-	isClosed    bool
-	closeOnce   sync.Once
+	// Main channel (client/server): single priority queues matching one pipe.
+	sendq *prioQueue
+	recvq *prioQueue
+	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
+	sendch *msgChannel
+	recvch *msgChannel
+	actived   int32
+	pinged    int32
+	sentBytes int64
+	id        string
+	needclose int32 // atomic bool
+	mu        sync.RWMutex
+	isClosed  bool
+	closeOnce sync.Once
 }
 
 func (p *ProxyConn) closeConn() {
@@ -136,7 +138,7 @@ func dialWithTimeout(conn network.Conn, addr string, timeoutSec int) (network.Co
 	}
 }
 
-// CloseChannels safely closes all internal channels without racing with concurrent send/recv.
+// CloseChannels safely closes all internal queues without racing with concurrent send/recv.
 func (p *ProxyConn) CloseChannels() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -144,75 +146,104 @@ func (p *ProxyConn) CloseChannels() {
 		return
 	}
 	p.isClosed = true
+	if p.sendq != nil {
+		p.sendq.Close()
+	}
+	if p.recvq != nil {
+		p.recvq.Close()
+	}
 	if p.sendch != nil {
 		p.sendch.Close()
 	}
 	if p.recvch != nil {
 		p.recvch.Close()
 	}
-	if p.ctrlsendch != nil {
-		p.ctrlsendch.Close()
-	}
-	if p.ctrlrecvch != nil {
-		p.ctrlrecvch.Close()
-	}
 }
 
-// pickSendCh selects the outbound channel under RLock, then returns it so the
-// caller can Write outside the ProxyConn lock (msgChannel serializes Close/Write).
-func (p *ProxyConn) pickSendCh(preferCtrl bool) *msgChannel {
+func (p *ProxyConn) pickSendQ() *prioQueue {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.isClosed {
 		return nil
 	}
-	if preferCtrl && p.ctrlsendch != nil {
-		return p.ctrlsendch
+	return p.sendq
+}
+
+func (p *ProxyConn) pickRecvQ() *prioQueue {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return nil
+	}
+	return p.recvq
+}
+
+func (p *ProxyConn) pickSendCh() *msgChannel {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if p.isClosed {
+		return nil
 	}
 	return p.sendch
 }
 
-func (p *ProxyConn) pickRecvCh(preferCtrl bool) *msgChannel {
+func (p *ProxyConn) pickRecvCh() *msgChannel {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 	if p.isClosed {
 		return nil
 	}
-	if preferCtrl && p.ctrlrecvch != nil {
-		return p.ctrlrecvch
-	}
 	return p.recvch
 }
 
-// SendFrame routes frames: control frames go to ctrlsendch (high priority) and data frames go to sendch.
+// SendFrame enqueues a frame on the main priority queue (control jumps ahead).
 func (p *ProxyConn) SendFrame(f *ProxyFrame) {
-	preferCtrl := f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG
-	ch := p.pickSendCh(preferCtrl)
-	if ch != nil {
+	if q := p.pickSendQ(); q != nil {
+		prio := prioControl
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+			prio = prioBulk
+		}
+		q.Push(f, prio)
+		return
+	}
+	if ch := p.pickSendCh(); ch != nil {
 		ch.Write(f)
 	}
 }
 
-// SendData sends data frames, routing initial interactive traffic to ctrlsendch and bulk traffic to sendch.
+// SendData enqueues DATA: interactive can jump ahead of bulk on the same queue.
 func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
-	ch := p.pickSendCh(isInteractive)
-	if ch != nil {
+	if q := p.pickSendQ(); q != nil {
+		prio := prioBulk
+		if isInteractive {
+			prio = prioInter
+		}
+		q.Push(f, prio)
+		return
+	}
+	if ch := p.pickSendCh(); ch != nil {
 		ch.Write(f)
 	}
 }
 
-// RecvFrame routes received frames to ctrlrecvch or recvch in a thread-safe manner.
+// RecvFrame enqueues a received frame; control is popped before DATA.
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
-	preferCtrl := f.Type != FRAME_TYPE_DATA && f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG
-	ch := p.pickRecvCh(preferCtrl)
-	if ch != nil {
+	if q := p.pickRecvQ(); q != nil {
+		prio := prioControl
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+			prio = prioBulk
+		}
+		q.Push(f, prio)
+		return
+	}
+	if ch := p.pickRecvCh(); ch != nil {
 		ch.Write(f)
 	}
 }
 
 // SendSonnyData safely writes a data frame to sonny's sendch with timeout.
 func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
-	ch := p.pickSendCh(false)
+	ch := p.pickSendCh()
 	if ch == nil {
 		return true
 	}
@@ -221,16 +252,14 @@ func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
 
 // SendSonnyClose safely writes a close frame to sonny's sendch.
 func (p *ProxyConn) SendSonnyClose(f *ProxyFrame) {
-	ch := p.pickSendCh(false)
-	if ch != nil {
+	if ch := p.pickSendCh(); ch != nil {
 		ch.Write(f)
 	}
 }
 
 // RecvSonnyData safely writes an incoming frame from sonny's socket to sonny's recvch.
 func (p *ProxyConn) RecvSonnyData(f *ProxyFrame) {
-	ch := p.pickRecvCh(false)
-	if ch != nil {
+	if ch := p.pickRecvCh(); ch != nil {
 		ch.Write(f)
 	}
 }
@@ -433,20 +462,13 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 	return nil
 }
 
-func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
+func sendTo(wg *thread.Group, sendq *prioQueue, conn network.Conn, compress int, maxmsgsize int, encrypt string, pingflag *int32, pongflag *int32, pongtime *int64) error {
 
 	atomic.AddInt32(&gStateThreadNum.SendThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
 
 	loggo.Info("sendTo start %s", conn.Info())
 	bs := make([]byte, 4)
-
-	var ctrlCh <-chan any
-	var ctrlDone <-chan struct{}
-	if ctrlsendch != nil {
-		ctrlCh = ctrlsendch.Ch()
-		ctrlDone = ctrlsendch.Done()
-	}
 
 	for !isExit(wg) {
 		var f *ProxyFrame
@@ -463,61 +485,14 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 			f.PongFrame = &PongFrame{}
 			f.PongFrame.Time = *pongtime
 		} else {
-			exit := false
-			// 1. Strict priority check: send control frame first if any is ready
-			select {
-			case ff := <-ctrlCh:
-				if ff == nil {
-					exit = true
-				} else {
-					f = ff.(*ProxyFrame)
-				}
-			case <-ctrlDone:
-				exit = true
-			default:
-			}
-
-			// 2. If no control frame was ready, wait on either (ctrl prioritized)
-			if f == nil && !exit {
-				select {
-				case ff := <-ctrlCh:
-					if ff == nil {
-						exit = true
-						break
-					}
-					f = ff.(*ProxyFrame)
-				case <-ctrlDone:
-					exit = true
-				default:
-					select {
-					case ff := <-ctrlCh:
-						if ff == nil {
-							exit = true
-							break
-						}
-						f = ff.(*ProxyFrame)
-					case ff := <-sendch.Ch():
-						if ff == nil {
-							exit = true
-							break
-						}
-						f = ff.(*ProxyFrame)
-					case <-ctrlDone:
-						exit = true
-					case <-sendch.Done():
-						exit = true
-					case <-time.After(time.Second):
-						break
-					}
-				}
-			}
-
-			if f == nil {
-				if exit {
+			v, closed, ok := sendq.PopWait(time.Second)
+			if !ok {
+				if closed {
 					break
 				}
 				continue
 			}
+			f = v.(*ProxyFrame)
 		}
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
@@ -575,7 +550,7 @@ func sendTo(wg *thread.Group, sendch *msgChannel, ctrlsendch *msgChannel, conn n
 const (
 	MAX_INDEX               = 1024
 	MAX_CHUNK_SIZE          = 32 * 1024  // Chunk frames to 32KB to allow fair interleaving and prevent head-of-line blocking
-	INTERACTIVE_BYTES_LIMIT = 256 * 1024 // Initial data bytes of a connection sent via high-priority queue to prevent head-of-line blocking
+	INTERACTIVE_BYTES_LIMIT = 256 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
 )
 
 func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
@@ -695,7 +670,7 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 	return nil
 }
 
-func checkPingActive(wg *thread.Group, sendch *msgChannel, recvch *msgChannel, proxyconn *ProxyConn,
+func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 	estimeout int, pinginter int, pingintertimeout int, showping bool, pingflag *int32) error {
 
 	loggo.Info("checkPingActive start %s", proxyconn.conn.Info())
@@ -781,12 +756,12 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 	return nil
 }
 
-func processPing(f *ProxyFrame, sendch *msgChannel, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
+func processPing(f *ProxyFrame, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
 	atomic.AddInt32(pongflag, 1)
 	*pongtime = f.PingFrame.Time
 }
 
-func processPong(f *ProxyFrame, sendch *msgChannel, proxyconn *ProxyConn, showping bool) {
+func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) {
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	atomic.StoreInt32(&proxyconn.pinged, 0)
 	if showping {
