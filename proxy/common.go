@@ -46,8 +46,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxMsgSize:                1024 * 1024,
-		MainBuffer:                64,
-		ConnBuffer:                16,
+		MainBuffer:                128,
+		ConnBuffer:                32,
 		EstablishedTimeout:        30,
 		PingInter:                 1,
 		PingTimeoutInter:          30,
@@ -66,7 +66,7 @@ func DefaultConfig() *Config {
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
 		ProbeInter:                5,
-		ProbeSize:                 32 * 1024,
+		ProbeSize:                 64 * 1024,
 	}
 }
 
@@ -559,8 +559,8 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 
 const (
 	MAX_INDEX               = 1024
-	MAX_CHUNK_SIZE          = 32 * 1024  // Chunk frames to 32KB to allow fair interleaving and prevent head-of-line blocking
-	INTERACTIVE_BYTES_LIMIT = 256 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
+	MAX_CHUNK_SIZE          = 64 * 1024  // Chunk frames to 64KB to allow fair interleaving and prevent head-of-line blocking
+	INTERACTIVE_BYTES_LIMIT = 512 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
 )
 
 func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
