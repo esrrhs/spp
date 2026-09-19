@@ -278,6 +278,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dia
 	})
 
 	wg.Wait()
+	proxyConn.closeConn()
 	if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
 		atomic.AddInt32(&o.sonnyNum, -1)
 	}
