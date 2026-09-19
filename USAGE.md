@@ -176,6 +176,36 @@ External proxy protocols and internal transit protocols can be converted automat
 
 SPP supports JSON configuration files via `-config <path>`. Command-line arguments can override settings in the configuration file.
 
+### Generate configs
+
+```bash
+./spp -genconfig
+```
+
+Writes these files (shared random auth/encrypt keys):
+
+| File | Role |
+| :--- | :--- |
+| `config_server.json` | Server listening on **all** main channels (`tcp`/`rudp`/`ricmp`/`kcp`/`quic`/`rhttp`) |
+| `config_proxy_client.json` | Forward proxy (`:8080` → `:8080`) |
+| `config_reverse_proxy_client.json` | Reverse proxy |
+| `config_socks5_client.json` | SOCKS5 on `:1080` |
+| `config_reverse_socks5_client.json` | Reverse SOCKS5 on `:1080` |
+
+Client configs dial the same full set of underlay addresses. Defaults: AEAD `chacha20`, compression `zstd` / threshold `128`.
+
+```bash
+./spp -genconfig -outdir ./conf    # output directory
+./spp -genconfig -force            # overwrite existing files
+```
+
+Then:
+
+```bash
+./spp -config config_server.json
+./spp -config config_proxy_client.json   # or reverse / socks5 / reverse_socks5
+```
+
 ### Configuration File Schema
 
 | Field | Type | Description |
