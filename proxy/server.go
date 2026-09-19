@@ -136,7 +136,11 @@ func (s *Server) listen(index int) error {
 	for !isExit(s.wg) {
 		conn, err := s.listenConns[index].Accept()
 		if err != nil {
-			loggo.Info("Server listen Accept fail %s", err)
+			loggo.Debug("Server listen Accept fail %s", err)
+			if isExit(s.wg) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
