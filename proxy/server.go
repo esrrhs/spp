@@ -201,7 +201,11 @@ func (s *Server) servePipe(pipe *mainPipe) error {
 	})
 
 	wg.Go("Server checkPingActive"+" "+pipe.conn.Info(), func() error {
-		err := checkPingActive(wg, &pipe.ProxyConn, s.config.EstablishedTimeout, s.config.PingInter, s.config.PingTimeoutInter, s.config.ShowPing, &pingflag)
+		authTimeout := s.config.AuthTimeout
+		if authTimeout <= 0 {
+			authTimeout = s.config.EstablishedTimeout
+		}
+		err := checkPingActive(wg, &pipe.ProxyConn, authTimeout, s.config.PingInter, s.config.PingTimeoutInter, s.config.ShowPing, &pingflag)
 		if err != nil {
 			pipe.markGray(err.Error())
 		}
@@ -336,6 +340,7 @@ func (s *Server) processLogin(f *ProxyFrame, pipe *mainPipe, sessionRef *atomic.
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "auth proof error"
 		pipe.SendFrame(rf)
+		pipe.setNeedClose()
 		loggo.Error("processLogin auth proof fail %s", pipe.conn.Info())
 		return
 	}
@@ -427,6 +432,7 @@ func (s *Server) processChannelJoin(f *ProxyFrame, pipe *mainPipe, sessionRef *a
 		rf.ChannelJoinRspFrame.Ret = false
 		rf.ChannelJoinRspFrame.Msg = "auth proof error"
 		pipe.SendFrame(rf)
+		pipe.setNeedClose()
 		loggo.Error("processChannelJoin auth fail %s", pipe.conn.Info())
 		return
 	}
