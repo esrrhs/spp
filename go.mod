@@ -3,7 +3,7 @@ module github.com/esrrhs/spp
 go 1.26.0
 
 require (
-	github.com/esrrhs/gohome v0.0.0-20260918115933-eb9346239ac7
+	github.com/esrrhs/gohome v0.0.0-20260919103929-754c0a0797db
 	golang.org/x/crypto v0.57.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -11,7 +11,7 @@ require (
 require (
 	github.com/OneOfOne/xxhash v1.2.8 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/klauspost/compress v1.18.0 // indirect
+	github.com/klauspost/compress v1.20.0 // indirect
 	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/klauspost/reedsolomon v1.14.2 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
