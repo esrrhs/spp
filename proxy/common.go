@@ -575,10 +575,9 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	for !isExit(wg) {
 		msglen, err := conn.Read(ds)
 		if err != nil {
-			loggo.Info("recvFromSonny Read fail: %s %s", conn.Info(), err.Error())
-			if err == io.EOF {
-				return nil
-			}
+			// Peer FIN (EOF) must non-nil-return so Group.exit closes the conn;
+			// returning nil left sockets in CLOSE-WAIT until ConnTimeout.
+			loggo.Debug("recvFromSonny Read fail: %s %s", conn.Info(), err)
 			return err
 		}
 
@@ -660,7 +659,7 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 
 		n, err := conn.Write(f.DataFrame.Data)
 		if err != nil {
-			loggo.Info("sendToSonny Write fail: %s %s", conn.Info(), err.Error())
+			loggo.Debug("sendToSonny Write fail: %s %s", conn.Info(), err)
 			return err
 		}
 
