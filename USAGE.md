@@ -15,7 +15,9 @@ This document provides a comprehensive guide on configuring, running, and deploy
   - [2. Reverse Proxy](#2-reverse-proxy)
   - [3. SOCKS5 Forward Proxy](#3-socks5-forward-proxy)
   - [4. SOCKS5 Reverse Proxy](#4-socks5-reverse-proxy)
-  - [5. Shadowsocks Plugin](#5-shadowsocks-plugin)
+  - [5. HTTP/HTTPS Forward Proxy](#5-httphttps-forward-proxy)
+  - [6. HTTP/HTTPS Reverse Proxy](#6-httphttps-reverse-proxy)
+  - [7. Shadowsocks Plugin](#7-shadowsocks-plugin)
 - [Protocol Multiplexing and Conversion](#protocol-multiplexing-and-conversion)
 - [Configuration File](#configuration-file)
   - [Configuration File Schema](#configuration-file-schema)
@@ -32,7 +34,7 @@ This document provides a comprehensive guide on configuring, running, and deploy
 SPP is designed to route and forward network traffic across diverse network environments and protocol boundaries. It supports:
 - **Proxy Protocols**: TCP, UDP
 - **Transit Protocols**: TCP, UDP, RUDP (Reliable UDP), RICMP (Reliable ICMP), RHTTP (Reliable HTTP), KCP, QUIC
-- **Proxy Types**: Forward Proxy, Reverse Proxy, SOCKS5 Forward Proxy, SOCKS5 Reverse Proxy, Shadowsocks plugin mode
+- **Proxy Types**: Forward Proxy, Reverse Proxy, SOCKS5 Forward Proxy, SOCKS5 Reverse Proxy, HTTP/HTTPS Forward Proxy, HTTP/HTTPS Reverse Proxy, Shadowsocks plugin mode
 
 ---
 
@@ -128,7 +130,35 @@ Opens a SOCKS5 proxy server on the remote SPP server's port `8080`. Both TCP (`C
 ./spp -name "rev_socks5" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
 ```
 
-### 5. Shadowsocks Plugin
+### 5. HTTP/HTTPS Forward Proxy
+
+Starts an HTTP/HTTPS proxy server on the local machine on port `8080`. Supports standard HTTP methods (`GET`, `POST`, etc.) and HTTPS tunneling (`CONNECT`).
+
+```bash
+./spp -name "http" -type http_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
+```
+
+With optional Basic authentication (returns `407 Proxy Authentication Required` if unauthenticated):
+
+```bash
+./spp -name "http_auth" -type http_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp -username myuser -password mypass
+```
+
+### 6. HTTP/HTTPS Reverse Proxy
+
+Opens an HTTP/HTTPS proxy server on the remote SPP server's port `8080`. Traffic sent to the remote server's HTTP proxy port is proxied through the client network.
+
+```bash
+./spp -name "rev_http" -type reverse_http_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
+```
+
+With optional Basic authentication:
+
+```bash
+./spp -name "rev_http_auth" -type reverse_http_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp -username myuser -password mypass
+```
+
+### 7. Shadowsocks Plugin
 
 SPP can function as a SIP003 plugin for Shadowsocks:
 - [spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin)
@@ -191,6 +221,8 @@ Writes these files (shared random auth/encrypt keys):
 | `config_reverse_proxy_client.json` | Reverse proxy |
 | `config_socks5_client.json` | SOCKS5 on `:1080` |
 | `config_reverse_socks5_client.json` | Reverse SOCKS5 on `:1080` |
+| `config_http_client.json` | HTTP/HTTPS proxy on `:8081` |
+| `config_reverse_http_client.json` | Reverse HTTP/HTTPS proxy on `:8081` |
 
 Client configs dial the same full set of underlay addresses. Defaults: AEAD `chacha20`, compression `zstd` / threshold `128`.
 
@@ -203,14 +235,14 @@ Then:
 
 ```bash
 ./spp -config config_server.json
-./spp -config config_proxy_client.json   # or reverse / socks5 / reverse_socks5
+./spp -config config_proxy_client.json   # or reverse / socks5 / reverse_socks5 / http / reverse_http
 ```
 
 ### Configuration File Schema
 
 | Field | Type | Description |
 | :--- | :--- | :--- |
-| `type` | string | `server`, `proxy_client`, `reverse_proxy_client`, `socks5_client`, `reverse_socks5_client` |
+| `type` | string | `server`, `proxy_client`, `reverse_proxy_client`, `socks5_client`, `reverse_socks5_client`, `http_client`, `reverse_http_client` |
 | `proto` | array of string | Internal transit protocols (e.g. `["tcp"]`, `["kcp"]`, `["quic"]`) |
 | `proxyproto` | array of string | Proxy protocols (e.g. `["tcp"]`, `["udp"]`) |
 | `listen` | array of string | Server listening addresses (e.g. `[":8888"]`) |
@@ -280,7 +312,7 @@ Run:
 ```text
 Usage of spp:
   -type string
-        Role type: server, proxy_client, reverse_proxy_client, socks5_client, reverse_socks5_client
+        Role type: server, proxy_client, reverse_proxy_client, socks5_client, reverse_socks5_client, http_client, reverse_http_client
   -config string
         Path to json configuration file
   -proto value

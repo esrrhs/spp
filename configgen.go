@@ -28,6 +28,8 @@ var clientModes = []struct {
 	{Type: "reverse_proxy_client", File: "config_reverse_proxy_client.json", Name: "reverse_proxy_client"},
 	{Type: "socks5_client", File: "config_socks5_client.json", Name: "socks5_client"},
 	{Type: "reverse_socks5_client", File: "config_reverse_socks5_client.json", Name: "reverse_socks5_client"},
+	{Type: "http_client", File: "config_http_client.json", Name: "http_client"},
+	{Type: "reverse_http_client", File: "config_reverse_http_client.json", Name: "reverse_http_client"},
 }
 
 func randomSecret() (string, error) {
@@ -157,6 +159,14 @@ func defaultClientConfig(clientType, key, encrypt string) (ConfigFile, error) {
 		cfg.Name = "reverse_socks5_client"
 		cfg.ProxyProto = []string{"tcp"}
 		cfg.FromAddr = []string{":1080"}
+	case "http_client":
+		cfg.Name = "http_client"
+		cfg.ProxyProto = []string{"tcp"}
+		cfg.FromAddr = []string{":8081"}
+	case "reverse_http_client":
+		cfg.Name = "reverse_http_client"
+		cfg.ProxyProto = []string{"tcp"}
+		cfg.FromAddr = []string{":8081"}
 	default:
 		return ConfigFile{}, fmt.Errorf("unsupported client type: %s", clientType)
 	}
@@ -230,6 +240,8 @@ func generateConfigs(outdir string, force bool) error {
 	fmt.Printf("start reverse proxy:       ./spp -config %s\n", filepath.Join(outdir, "config_reverse_proxy_client.json"))
 	fmt.Printf("start socks5 proxy:        ./spp -config %s\n", filepath.Join(outdir, "config_socks5_client.json"))
 	fmt.Printf("start reverse socks5:      ./spp -config %s\n", filepath.Join(outdir, "config_reverse_socks5_client.json"))
+	fmt.Printf("start http proxy:          ./spp -config %s\n", filepath.Join(outdir, "config_http_client.json"))
+	fmt.Printf("start reverse http proxy:  ./spp -config %s\n", filepath.Join(outdir, "config_reverse_http_client.json"))
 	_ = paths
 	return nil
 }

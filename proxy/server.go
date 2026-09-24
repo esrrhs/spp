@@ -513,7 +513,7 @@ func (s *Server) iniService(wg *thread.Group, f *ProxyFrame, clientConn *ClientC
 	}
 
 	switch f.LoginFrame.Clienttype {
-	case CLIENT_TYPE_PROXY, CLIENT_TYPE_SOCKS5, CLIENT_TYPE_SS_PROXY:
+	case CLIENT_TYPE_PROXY, CLIENT_TYPE_SOCKS5, CLIENT_TYPE_SS_PROXY, CLIENT_TYPE_HTTP:
 		for i, svc := range services {
 			var output *Outputer
 			var err error
@@ -548,6 +548,16 @@ func (s *Server) iniService(wg *thread.Group, f *ProxyFrame, clientConn *ClientC
 			}
 			clientConn.appendInput(input)
 			loggo.Info("iniService server socks5 input[%d] %s %s", i, svc.Proxyproto.String(), svc.Fromaddr)
+		}
+	case CLIENT_TYPE_REVERSE_HTTP:
+		for i, svc := range services {
+			input, err := NewHttpInputer(wg, svc.Proxyproto.String(), svc.Fromaddr, f.LoginFrame.Clienttype, s.config, &clientConn.ProxyConn, i)
+			if err != nil {
+				clientConn.closeServices()
+				return err
+			}
+			clientConn.appendInput(input)
+			loggo.Info("iniService server http input[%d] %s %s", i, svc.Proxyproto.String(), svc.Fromaddr)
 		}
 	default:
 		return errors.New("error CLIENT_TYPE " + strconv.Itoa(int(f.LoginFrame.Clienttype)))
