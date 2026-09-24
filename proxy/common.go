@@ -22,7 +22,8 @@ type Config struct {
 	MaxMsgSize                int          // 消息最大长度
 	MainBuffer                int          // 主通道buffer最大长度
 	ConnBuffer                int          // 每个conn buffer最大长度
-	EstablishedTimeout        int          // 主通道登录超时
+	EstablishedTimeout        int          // sonny 等业务连接建立超时
+	AuthTimeout               int          // 主通道登录/鉴权超时；超时未 established 则踢掉
 	PingInter                 int          // 主通道ping间隔
 	PingTimeoutInter          int          // 主通道ping超时间隔
 	ConnTimeout               int          // 每个conn的不活跃超时时间
@@ -49,6 +50,7 @@ func DefaultConfig() *Config {
 		MainBuffer:                128,
 		ConnBuffer:                32,
 		EstablishedTimeout:        30,
+		AuthTimeout:               5,
 		PingInter:                 1,
 		PingTimeoutInter:          30,
 		ConnTimeout:               60,
@@ -587,10 +589,9 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	for !isExit(wg) {
 		msglen, err := conn.Read(ds)
 		if err != nil {
-			loggo.Info("recvFromSonny Read fail: %s %s", conn.Info(), err.Error())
-			if err == io.EOF {
-				return nil
-			}
+			// Peer FIN (EOF) must non-nil-return so Group.exit closes the conn;
+			// returning nil left sockets in CLOSE-WAIT until ConnTimeout.
+			loggo.Debug("recvFromSonny Read fail: %s %s", conn.Info(), err)
 			return err
 		}
 
@@ -672,7 +673,7 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 
 		n, err := conn.Write(f.DataFrame.Data)
 		if err != nil {
-			loggo.Info("sendToSonny Write fail: %s %s", conn.Info(), err.Error())
+			loggo.Debug("sendToSonny Write fail: %s %s", conn.Info(), err)
 			return err
 		}
 
