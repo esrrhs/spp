@@ -144,10 +144,10 @@ func (i *Inputer) processOpenRspFrame(f *ProxyFrame) {
 	sonny := v.(*ProxyConn)
 	if f.OpenRspFrame.Ret {
 		sonny.setEstablished(true)
-		loggo.Info("Inputer processOpenRspFrame ok %s %s", id, sonny.conn.Info())
+		loggo.Info("Inputer processOpenRspFrame ok %s %s", id, sonny.Info())
 	} else {
 		sonny.setNeedClose()
-		loggo.Info("Inputer processOpenRspFrame fail %s %s", id, sonny.conn.Info())
+		loggo.Info("Inputer processOpenRspFrame fail %s %s", id, sonny.Info())
 	}
 }
 
@@ -223,44 +223,62 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
 	loggo.Debug("processSocks5Conn start %s", proxyConn.conn.Info())
 
+	if proxyConn.conn.Name() != "tcp" {
+		loggo.Error("processSocks5Conn no tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
+		proxyConn.closeConn()
+		return errors.New("socks5 not tcp")
+	}
+
+	var reqCmd byte
+	var targetAddr string
+	var handshakeErr error
 	wg := thread.NewGroup("Inputer processSocks5Conn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Debug("group start exit %s", proxyConn.conn.Info())
-		proxyConn.closeConn()
+		if reqCmd != network.Socks5CmdUDPAssociate {
+			proxyConn.closeConn()
+		}
 		loggo.Debug("group end exit %s", proxyConn.conn.Info())
 	})
 
-	targetAddr := ""
 	wg.Go("Inputer socks5"+" "+proxyConn.conn.Info(), func() error {
-		if proxyConn.conn.Name() != "tcp" {
-			loggo.Error("processSocks5Conn no tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
-			return errors.New("socks5 not tcp")
-		}
-
-		var err error = nil
-		if err = network.Sock5HandshakeBy(proxyConn.conn, i.config.Username, i.config.Password); err != nil {
+		if err := network.Sock5HandshakeBy(proxyConn.conn, i.config.Username, i.config.Password); err != nil {
 			loggo.Error("processSocks5Conn Sock5HandshakeBy %s %s", proxyConn.conn.Info(), err)
+			handshakeErr = err
 			return err
 		}
-		_, addr, err := network.Sock5GetRequest(proxyConn.conn)
+
+		cmd, _, host, err := network.Sock5GetRequest(proxyConn.conn)
 		if err != nil {
 			loggo.Error("processSocks5Conn Sock5GetRequest %s %s", proxyConn.conn.Info(), err)
+			handshakeErr = err
 			return err
 		}
-		// Sending connection established message immediately to client.
-		// This some round trip time for creating socks connection with the client.
-		// But if connection failed, the client will get connection reset error.
-		_, err = proxyConn.conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x08, 0x43})
-		if err != nil {
-			loggo.Error("processSocks5Conn Write %s %s", proxyConn.conn.Info(), err)
-			return err
-		}
-
-		targetAddr = addr
+		reqCmd = cmd
+		targetAddr = host
 		return nil
 	})
 
 	err := wg.Wait()
+	if err != nil || handshakeErr != nil {
+		proxyConn.closeConn()
+		return nil
+	}
+
+	if reqCmd == network.Socks5CmdUDPAssociate {
+		loggo.Info("processSocks5Conn UDP ASSOCIATE %s", proxyConn.conn.Info())
+		i.fwg.Go("Inputer socks5UDPAssociate"+" "+proxyConn.conn.Info(), func() error {
+			defer proxyConn.closeConn()
+			return i.handleSocks5UDPAssociate(proxyConn, targetAddr)
+		})
+		return nil
+	}
+
+	// SOCKS5 CONNECT
+	// Sending connection established message immediately to client.
+	err = network.Sock5SendConnectReply(proxyConn.conn, 0, "0.0.0.0:0")
 	if err != nil {
+		loggo.Error("processSocks5Conn Write %s %s", proxyConn.conn.Info(), err)
+		proxyConn.closeConn()
 		return nil
 	}
 
@@ -360,6 +378,19 @@ func (i *Inputer) openConn(proxyConn *ProxyConn, targetAddr string) {
 
 	i.father.SendFrame(f)
 	loggo.Info("Inputer openConn %s %s proto=%s service=%d", proxyConn.id, targetAddr, i.proto, i.serviceIndex)
+}
+
+func (i *Inputer) openConnWithProto(proxyConn *ProxyConn, targetAddr string, proto PROXY_PROTO) {
+	f := &ProxyFrame{}
+	f.Type = FRAME_TYPE_OPEN
+	f.OpenFrame = &OpenConnFrame{}
+	f.OpenFrame.Id = proxyConn.id
+	f.OpenFrame.Toaddr = targetAddr
+	f.OpenFrame.ServiceIndex = i.serviceIndex
+	f.OpenFrame.Proxyproto = proto
+
+	i.father.SendFrame(f)
+	loggo.Info("Inputer openConnWithProto %s %s proto=%s service=%d", proxyConn.id, targetAddr, proto.String(), i.serviceIndex)
 }
 
 func (i *Inputer) sonnySize() int {
