@@ -131,6 +131,13 @@ type ProxyConn struct {
 	router frameRouter
 }
 
+func (p *ProxyConn) Info() string {
+	if p.conn != nil {
+		return p.conn.Info()
+	}
+	return "sonny-" + p.id
+}
+
 func (p *ProxyConn) closeConn() {
 	p.closeOnce.Do(func() {
 		if p.conn != nil {
@@ -289,7 +296,12 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
+		if f.Type == FRAME_TYPE_DATA {
+			prio = prioBulk
+			if f.DataFrame != nil && len(f.DataFrame.Data) <= 4096 {
+				prio = prioInter
+			}
+		} else if f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -684,7 +696,7 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 	estimeout int, pinginter int, pingintertimeout int, showping bool, pingflag *int32) error {
 
-	loggo.Info("checkPingActive start %s", proxyconn.conn.Info())
+	loggo.Info("checkPingActive start %s", proxyconn.Info())
 
 	// 1. 设置整体超时时间
 	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
@@ -698,7 +710,7 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 	// 整体超时触发
 	case <-timeoutTimer.C:
 		if !proxyconn.isEstablished() {
-			loggo.Info("checkPingActive established timeout %s", proxyconn.conn.Info())
+			loggo.Info("checkPingActive established timeout %s", proxyconn.Info())
 			return errors.New("established timeout")
 		}
 		break
@@ -720,7 +732,7 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 		case <-pingTicker.C:
 			// 检查心跳超时逻辑
 			if atomic.LoadInt32(&proxyconn.pinged) > int32(pingintertimeout) {
-				loggo.Info("checkPingActive ping pong timeout %s", proxyconn.conn.Info())
+				loggo.Info("checkPingActive ping pong timeout %s", proxyconn.Info())
 				return errors.New("ping pong timeout")
 			}
 
@@ -728,17 +740,17 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 			atomic.AddInt32(pingflag, 1)
 			atomic.AddInt32(&proxyconn.pinged, 1)
 			if showping {
-				loggo.Info("ping %s", proxyconn.conn.Info())
+				loggo.Info("ping %s", proxyconn.Info())
 			}
 		}
 	}
 
-	loggo.Info("checkPingActive end %s", proxyconn.conn.Info())
+	loggo.Info("checkPingActive end %s", proxyconn.Info())
 	return nil
 }
 
 func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
-	loggo.Info("checkNeedClose start %s", proxyconn.conn.Info())
+	loggo.Info("checkNeedClose start %s", proxyconn.Info())
 
 	// 创建定时器
 	ticker := time.NewTicker(time.Second)
@@ -755,14 +767,14 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 		// 2. 定时检查逻辑
 		case <-ticker.C:
 			if proxyconn.isNeedClose() {
-				loggo.Error("checkNeedClose needclose %s", proxyconn.conn.Info())
+				loggo.Error("checkNeedClose needclose %s", proxyconn.Info())
 				// 遇到错误通常直接返回，不需要走 exit 流程
 				return errors.New("needclose")
 			}
 		}
 	}
 
-	loggo.Info("checkNeedClose end %s", proxyconn.conn.Info())
+	loggo.Info("checkNeedClose end %s", proxyconn.Info())
 
 	return nil
 }
@@ -776,13 +788,13 @@ func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) time.Durati
 	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
 	atomic.StoreInt32(&proxyconn.pinged, 0)
 	if showping {
-		loggo.Info("pong %s %s", proxyconn.conn.Info(), elapse.String())
+		loggo.Info("pong %s %s", proxyconn.Info(), elapse.String())
 	}
 	return elapse
 }
 
 func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, timeout int) error {
-	loggo.Info("checkSonnyActive start %s", proxyconn.conn.Info())
+	loggo.Info("checkSonnyActive start %s", proxyconn.Info())
 
 	// 1. 设置整体超时时间
 	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
@@ -796,7 +808,7 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 	// 整体超时触发
 	case <-timeoutTimer.C:
 		if !proxyconn.isEstablished() {
-			loggo.Error("checkSonnyActive established timeout %s", proxyconn.conn.Info())
+			loggo.Error("checkSonnyActive established timeout %s", proxyconn.Info())
 			return errors.New("established timeout")
 		}
 		break
@@ -817,19 +829,19 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 		// 2. 定时触发 Ping 逻辑
 		case <-activedTicker.C:
 			if atomic.LoadInt32(&proxyconn.actived) == 0 {
-				loggo.Error("checkSonnyActive timeout %s", proxyconn.conn.Info())
+				loggo.Error("checkSonnyActive timeout %s", proxyconn.Info())
 				return errors.New("conn timeout")
 			}
 			atomic.StoreInt32(&proxyconn.actived, 0)
 		}
 	}
 
-	loggo.Info("checkSonnyActive end %s", proxyconn.conn.Info())
+	loggo.Info("checkSonnyActive end %s", proxyconn.Info())
 	return nil
 }
 
 func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, father *ProxyConn) error {
-	loggo.Info("copySonnyRecv start %s", proxyConn.conn.Info())
+	loggo.Info("copySonnyRecv start %s", proxyConn.Info())
 
 	for !isExit(wg) {
 		var ff interface{}
@@ -843,16 +855,16 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 		}
 		f := ff.(*ProxyFrame)
 		if f.Type != FRAME_TYPE_DATA {
-			loggo.Error("copySonnyRecv type error %s %d", proxyConn.conn.Info(), f.Type)
+			loggo.Error("copySonnyRecv type error %s %d", proxyConn.Info(), f.Type)
 			return errors.New("conn type error")
 		}
 		if f.DataFrame.Compress {
-			loggo.Error("copySonnyRecv compress error %s %d", proxyConn.conn.Info(), f.Type)
+			loggo.Error("copySonnyRecv compress error %s %d", proxyConn.Info(), f.Type)
 			return errors.New("conn compress error")
 		}
 		if loggo.IsDebug() {
 			if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
-				loggo.Error("copySonnyRecv crc error %s %s %s", proxyConn.conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc)
+				loggo.Error("copySonnyRecv crc error %s %s %s", proxyConn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc)
 				return errors.New("conn crc error")
 			}
 		}
@@ -866,7 +878,7 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 
 		loggo.Debug("copySonnyRecv %s %d %s %p", proxyConn.id, dataLen, dataCrc, f)
 	}
-	loggo.Info("copySonnyRecv end %s", proxyConn.conn.Info())
+	loggo.Info("copySonnyRecv end %s", proxyConn.Info())
 	return nil
 }
 

@@ -116,13 +116,28 @@ func (q *prioQueue) Done() <-chan struct{} {
 	return q.done
 }
 
+func (q *prioQueue) limitForPrio(p framePrio) int {
+	if q.cap <= 1 {
+		return q.cap
+	}
+	switch p {
+	case prioControl:
+		return q.cap + 256
+	case prioInter:
+		return q.cap + 64
+	default:
+		return q.cap
+	}
+}
+
 func (q *prioQueue) Push(v interface{}, p framePrio) {
 	if p < 0 || p >= prioCount {
 		p = prioBulk
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for !q.closed && q.size >= q.cap {
+	limit := q.limitForPrio(p)
+	for !q.closed && q.size >= limit {
 		q.cond.Wait()
 	}
 	if q.closed {
@@ -143,7 +158,8 @@ func (q *prioQueue) PushTimeout(v interface{}, p framePrio, timeoutms int) bool 
 	deadline := time.Now().Add(time.Duration(timeoutms) * time.Millisecond)
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for !q.closed && q.size >= q.cap {
+	limit := q.limitForPrio(p)
+	for !q.closed && q.size >= limit {
 		if time.Now().After(deadline) {
 			return false
 		}
@@ -202,7 +218,7 @@ func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, 
 		v = q.q[i][0]
 		q.q[i] = q.q[i][1:]
 		q.size--
-		q.cond.Signal()
+		q.cond.Broadcast()
 		return v, false, true
 	}
 	return nil, q.closed, false
