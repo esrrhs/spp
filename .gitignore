@@ -14,6 +14,7 @@
 # Log files
 *.log
 *.stderr
+*.pprof
 
 # Local benchmark outputs
 benchmark/socks5_rudp/out/

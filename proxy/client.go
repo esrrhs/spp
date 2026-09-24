@@ -601,13 +601,15 @@ func (c *Client) processSession(wg *thread.Group, sess *ServerConn) error {
 func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 	services := c.buildLoginServices()
 	switch c.clienttype {
-	case CLIENT_TYPE_PROXY, CLIENT_TYPE_SOCKS5, CLIENT_TYPE_SS_PROXY:
+	case CLIENT_TYPE_PROXY, CLIENT_TYPE_SOCKS5, CLIENT_TYPE_SS_PROXY, CLIENT_TYPE_HTTP:
 		for i, svc := range services {
 			var input *Inputer
 			var err error
 			switch c.clienttype {
 			case CLIENT_TYPE_SOCKS5:
 				input, err = NewSocks5Inputer(wg, svc.Proxyproto.String(), svc.Fromaddr, c.clienttype, c.config, &serverConn.ProxyConn, i)
+			case CLIENT_TYPE_HTTP:
+				input, err = NewHttpInputer(wg, svc.Proxyproto.String(), svc.Fromaddr, c.clienttype, c.config, &serverConn.ProxyConn, i)
 			default:
 				input, err = NewInputer(wg, svc.Proxyproto.String(), svc.Fromaddr, c.clienttype, c.config, &serverConn.ProxyConn, svc.Toaddr, i)
 			}
@@ -618,7 +620,7 @@ func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 			serverConn.appendInput(input)
 			loggo.Info("iniService client input[%d] %s %s -> %s", i, svc.Proxyproto.String(), svc.Fromaddr, svc.Toaddr)
 		}
-	case CLIENT_TYPE_REVERSE_PROXY, CLIENT_TYPE_REVERSE_SOCKS5:
+	case CLIENT_TYPE_REVERSE_PROXY, CLIENT_TYPE_REVERSE_SOCKS5, CLIENT_TYPE_REVERSE_HTTP:
 		for i, svc := range services {
 			output, err := NewOutputer(wg, svc.Proxyproto.String(), c.clienttype, c.config, &serverConn.ProxyConn, i)
 			if err != nil {

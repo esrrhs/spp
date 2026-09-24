@@ -20,6 +20,10 @@ enum CLIENT_TYPE {
     REVERSE_SOCKS5 = 3;
     // client fromaddr -> server shadowsocks address [SS_LOCAL_HOST:SS_LOCAL_PORT]
     SS_PROXY = 4;
+    // client fromaddr -> server (HTTP / HTTPS CONNECT proxy)
+    HTTP = 5;
+    // server fromaddr -> client (HTTP / HTTPS CONNECT reverse proxy)
+    REVERSE_HTTP = 6;
 }
 
 // COMPRESS_TYPE selects payload compression. UNSPECIFIED means "use peer default".
