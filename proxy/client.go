@@ -230,7 +230,11 @@ func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) error
 		return sendTo(wg, sendq, &pipe.ProxyConn, pipe.conn, c.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
 	wg.Go("Client checkPingActive "+proto, func() error {
-		err := checkPingActive(wg, &pipe.ProxyConn, c.config.EstablishedTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
+		authTimeout := c.config.AuthTimeout
+		if authTimeout <= 0 {
+			authTimeout = c.config.EstablishedTimeout
+		}
+		err := checkPingActive(wg, &pipe.ProxyConn, authTimeout, c.config.PingInter, c.config.PingTimeoutInter, c.config.ShowPing, &pingflag)
 		if err != nil {
 			pipe.markGray(err.Error())
 		}

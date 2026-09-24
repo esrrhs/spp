@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/esrrhs/gohome/common"
 	"github.com/esrrhs/gohome/loggo"
@@ -157,7 +158,12 @@ func (i *Inputer) listen(targetAddr string) error {
 	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
-			loggo.Info("Inputer listen Accept fail %s", err)
+			// Avoid busy-loop+log CPU spikes when Accept fails (e.g. EMFILE).
+			loggo.Debug("Inputer listen Accept fail %s", err)
+			if isExit(i.fwg) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
@@ -186,7 +192,12 @@ func (i *Inputer) listenSocks5() error {
 	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
-			loggo.Info("Inputer listen Accept fail %s", err)
+			// Avoid busy-loop+log CPU spikes when Accept fails (e.g. EMFILE from CLOSE-WAIT pileup).
+			loggo.Debug("Inputer listenSocks5 Accept fail %s", err)
+			if isExit(i.fwg) {
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
@@ -210,7 +221,7 @@ func (i *Inputer) listenSocks5() error {
 
 func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
-	loggo.Info("processSocks5Conn start %s", proxyConn.conn.Info())
+	loggo.Debug("processSocks5Conn start %s", proxyConn.conn.Info())
 
 	if proxyConn.conn.Name() != "tcp" {
 		loggo.Error("processSocks5Conn no tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
@@ -222,11 +233,11 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 	var targetAddr string
 	var handshakeErr error
 	wg := thread.NewGroup("Inputer processSocks5Conn"+" "+proxyConn.conn.Info(), i.fwg, func() {
-		loggo.Info("group start exit %s", proxyConn.conn.Info())
+		loggo.Debug("group start exit %s", proxyConn.conn.Info())
 		if reqCmd != network.Socks5CmdUDPAssociate {
 			proxyConn.closeConn()
 		}
-		loggo.Info("group end exit %s", proxyConn.conn.Info())
+		loggo.Debug("group end exit %s", proxyConn.conn.Info())
 	})
 
 	wg.Go("Inputer socks5"+" "+proxyConn.conn.Info(), func() error {
@@ -271,7 +282,7 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 		return nil
 	}
 
-	loggo.Info("processSocks5Conn ok %s %s", proxyConn.conn.Info(), targetAddr)
+	loggo.Debug("processSocks5Conn ok %s %s", proxyConn.conn.Info(), targetAddr)
 
 	i.fwg.Go("Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() error {
 		return i.processProxyConn(proxyConn, targetAddr)
@@ -333,6 +344,11 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	})
 
 	wg.Wait()
+	// Belt-and-suspenders: if all workers returned nil without Group.exit,
+	// still close the local socket (closeOnce makes this safe with exitfunc).
+	if proxyConn.conn != nil && proxyConn.conn.Name() != "udp" {
+		proxyConn.closeConn()
+	}
 	if _, ok := i.sonny.LoadAndDelete(proxyConn.id); ok {
 		atomic.AddInt32(&i.sonnyNum, -1)
 	}
