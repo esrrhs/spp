@@ -140,7 +140,7 @@ func main() {
 	outdir := flag.String("outdir", ".", "output directory for -genconfig")
 	force := flag.Bool("force", false, "overwrite existing files when using -genconfig")
 
-	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
+	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
 	var protos protoFlags
 	flag.Var(&protos, "proto", "main proto type: "+fmt.Sprintf("%v", network.SupportReliableProtos()))
 	var proxyproto proxyprotoFlags
@@ -291,8 +291,10 @@ func main() {
 		*t != "reverse_proxy_client" &&
 		*t != "socks5_client" &&
 		*t != "reverse_socks5_client" &&
+		*t != "http_client" &&
+		*t != "reverse_http_client" &&
 		*t != "server" {
-		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client")
+		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
 		fmt.Println()
 		flag.Usage()
 		return
@@ -322,7 +324,9 @@ func main() {
 	}
 
 	if *t == "socks5_client" ||
-		*t == "reverse_socks5_client" {
+		*t == "reverse_socks5_client" ||
+		*t == "http_client" ||
+		*t == "reverse_http_client" {
 		if !(len(fromaddr) == len(proxyproto)) {
 			fmt.Println("[fromaddr] [proxyproto] len must be equal")
 			fmt.Println()
@@ -332,7 +336,7 @@ func main() {
 
 		for i := range proxyproto {
 			if len(fromaddr[i]) == 0 || len(servers) == 0 {
-				fmt.Println("[socks5_client] or [reverse_socks5_client] need [server] [fromaddr] [proxyproto]")
+				fmt.Println("[socks5_client] or [reverse_socks5_client] or [http_client] or [reverse_http_client] need [server] [fromaddr] [proxyproto]")
 				fmt.Println()
 				flag.Usage()
 				return
