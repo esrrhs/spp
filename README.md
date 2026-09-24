@@ -21,8 +21,8 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
 * **Flexible Proxy Modes**:
   * Forward Proxy
   * Reverse Proxy (NAT traversal / intranet penetration)
-  * SOCKS5 Forward Proxy (with optional username/password auth)
-  * SOCKS5 Reverse Proxy
+  * SOCKS5 Forward Proxy (supports both TCP and UDP / UDP ASSOCIATE, with optional username/password auth)
+  * SOCKS5 Reverse Proxy (supports both TCP and UDP / UDP ASSOCIATE)
   * Shadowsocks SIP003 Plugin support ([spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin))
 * **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing one logical session to the server.
 * **Multi-Path Underlay**: Client can open multiple main pipes (e.g. `-proto tcp -server host:8888 -proto rudp -server host:8889`). Traffic prefers the highest-throughput path; unhealthy pipes are greyed out, probed, and re-enabled when they recover.
@@ -64,7 +64,7 @@ Both sides must use the **same** `-key` (auth) and `-encrypt` (wire crypto). Cho
     -key 'your-auth-key' -encrypt 'your-encrypt-key'
   ```
 
-* **Start SOCKS5 Proxy** (open SOCKS5 proxy on local port 8080):
+* **Start SOCKS5 Proxy** (open SOCKS5 proxy on local port 8080, supports both TCP and UDP forwarding):
   ```bash
   ./spp -type socks5_client -server www.server.com:8888 \
     -fromaddr :8080 -proxyproto tcp \

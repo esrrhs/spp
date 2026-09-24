@@ -108,7 +108,7 @@ Exposes a service running locally to the outside world through the SPP server. V
 
 ### 3. SOCKS5 Forward Proxy
 
-Starts a SOCKS5 proxy server on the local machine on port `8080`. All traffic sent to this SOCKS5 proxy is forwarded through the SPP server.
+Starts a SOCKS5 proxy server on the local machine on port `8080`. Both TCP (`CONNECT`) and UDP (`UDP ASSOCIATE`) traffic sent to this SOCKS5 proxy are automatically forwarded through the SPP server.
 
 ```bash
 ./spp -name "socks5" -type socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
@@ -122,7 +122,7 @@ With username and password authentication:
 
 ### 4. SOCKS5 Reverse Proxy
 
-Opens a SOCKS5 proxy server on the remote SPP server's port `8080`. Traffic sent to the remote server's SOCKS5 port is proxied through the client network.
+Opens a SOCKS5 proxy server on the remote SPP server's port `8080`. Both TCP (`CONNECT`) and UDP (`UDP ASSOCIATE`) traffic sent to the remote server's SOCKS5 port are proxied through the client network.
 
 ```bash
 ./spp -name "rev_socks5" -type reverse_socks5_client -server www.server.com:8888 -fromaddr :8080 -proxyproto tcp
