@@ -293,15 +293,13 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 }
 
 // RecvFrame enqueues a received frame; control is popped before DATA.
+// DATA must stay FIFO here: sendToSonny requires per-sonny Index order, so
+// size-based prioInter jump-ahead reorders chunks of the same TCP stream and
+// kills the connection with "index error".
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA {
-			prio = prioBulk
-			if f.DataFrame != nil && len(f.DataFrame.Data) <= 4096 {
-				prio = prioInter
-			}
-		} else if f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
