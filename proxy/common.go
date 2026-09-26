@@ -498,7 +498,7 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			f = &ProxyFrame{}
 			f.Type = FRAME_TYPE_PONG
 			f.PongFrame = &PongFrame{}
-			f.PongFrame.Time = *pongtime
+			f.PongFrame.Time = atomic.LoadInt64(pongtime)
 		} else {
 			v, closed, ok := sendq.PopWait(time.Second)
 			if !ok {
@@ -778,8 +778,8 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 }
 
 func processPing(f *ProxyFrame, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
+	atomic.StoreInt64(pongtime, f.PingFrame.Time)
 	atomic.AddInt32(pongflag, 1)
-	*pongtime = f.PingFrame.Time
 }
 
 func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) time.Duration {
