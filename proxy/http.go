@@ -145,9 +145,11 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 
 	reqLine, err := br.ReadString('\n')
 	if err != nil {
+		// Client disconnected before sending a request (health probe, scanner, etc.).
+		// Must not fail the Inputer group — that would tear down the whole proxy listen.
 		loggo.Debug("processHttpConn ReadString reqLine fail %s %v", proxyConn.conn.Info(), err)
 		proxyConn.closeConn()
-		return err
+		return nil
 	}
 
 	reqLineTrimmed := strings.TrimRight(reqLine, "\r\n")

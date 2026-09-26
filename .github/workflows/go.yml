@@ -46,8 +46,75 @@ jobs:
           go mod verify
           git diff --exit-code go.mod go.sum
 
+      # FullMatrix is sharded in e2e-matrix below for clearer failures / speed.
       - name: Run Tests (with Race Detector)
-        run: go test -v -race -timeout 5m ./...
+        run: go test -v -race -timeout 15m -skip 'TestE2E_FullMatrix' ./...
+
+      - name: Stability Gate (no race)
+        run: go test -v -timeout 10m -count=1 ./proxy/ -run 'TestE2E_(UnderlayMatrix|MixedChunk|ShortConnChurn|ConcurrentBulk|MultiPath_Failover|Lifecycle_|Resilience_)'
+
+  e2e-netem:
+    name: E2E netem loss+reorder
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      # Dedicated VM so lo netem does not disturb other jobs; fail if tc cannot run.
+      # setcap for ricmp (CAP_NET_RAW); tc uses sudo fallback inside the test.
+      - name: Netem integrity (rudp/kcp/quic/ricmp)
+        env:
+          SPP_NETEM_JOB: "1"
+          SPP_REQUIRE_NETEM: "1"
+        run: |
+          set -euo pipefail
+          go test -c -o "${RUNNER_TEMP}/proxy.test" ./proxy/
+          if sudo setcap cap_net_raw+ep "${RUNNER_TEMP}/proxy.test" 2>/dev/null; then
+            "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestE2E_Netem_LossReorder$'
+          else
+            sudo --preserve-env=PATH,GOROOT,GOPATH,HOME,GOCACHE,GOMODCACHE,GOPROXY,SPP_NETEM_JOB,SPP_REQUIRE_NETEM \
+              "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestE2E_Netem_LossReorder$'
+          fi
+
+  e2e-matrix:
+    name: E2E ${{ matrix.underlay }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        underlay: [tcp, rudp, kcp, quic, rhttp, ricmp]
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      - name: FullMatrix shard (${{ matrix.underlay }})
+        env:
+          SPP_MATRIX_UNDERLAY: ${{ matrix.underlay }}
+        run: |
+          set -euo pipefail
+          # ricmp needs raw ICMP (CAP_NET_RAW). Prefer setcap on the test
+          # binary; fall back to sudo if setcap is unavailable.
+          if [ "${{ matrix.underlay }}" = "ricmp" ]; then
+            go test -c -o "${RUNNER_TEMP}/proxy.test" ./proxy/
+            if sudo setcap cap_net_raw+ep "${RUNNER_TEMP}/proxy.test" 2>/dev/null; then
+              "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=12m -test.run '^TestE2E_FullMatrix$'
+            else
+              sudo --preserve-env=PATH,GOROOT,GOPATH,HOME,GOCACHE,GOMODCACHE,GOPROXY,SPP_MATRIX_UNDERLAY \
+                "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=12m -test.run '^TestE2E_FullMatrix$'
+            fi
+          else
+            go test -v -count=1 -timeout 12m ./proxy/ -run '^TestE2E_FullMatrix$'
+          fi
 
   build:
     name: Cross Build Check
