@@ -229,6 +229,9 @@ func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) error
 	wg.Go("Client sendTo "+proto, func() error {
 		return sendTo(wg, sendq, &pipe.ProxyConn, pipe.conn, c.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
+	// kcp/quic Accept only completes after the client writes application data.
+	// Without a nudge, server Accept and client waiting for AUTH_CHALLENGE deadlock.
+	atomic.StoreInt32(&pingflag, 1)
 	wg.Go("Client checkPingActive "+proto, func() error {
 		authTimeout := c.config.AuthTimeout
 		if authTimeout <= 0 {
