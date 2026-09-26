@@ -358,6 +358,51 @@ func TestDefaultConfig(t *testing.T) {
 	}
 }
 
+func TestParseCompressEncryptTypes(t *testing.T) {
+	cases := []struct {
+		in   string
+		want COMPRESS_TYPE
+		ok   bool
+	}{
+		{"", CompressUnspecified, true},
+		{"none", CompressNone, true},
+		{"zlib", CompressZlib, true},
+		{"zstd", CompressZstd, true},
+		{"bogus", CompressUnspecified, false},
+	}
+	for _, tc := range cases {
+		got, err := ParseCompressType(tc.in)
+		if tc.ok {
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseCompressType(%q)=%v,%v want %v", tc.in, got, err, tc.want)
+			}
+		} else if err == nil {
+			t.Fatalf("ParseCompressType(%q) expected error", tc.in)
+		}
+	}
+	encCases := []struct {
+		in   string
+		want ENCRYPT_TYPE
+		ok   bool
+	}{
+		{"", EncryptUnspecified, true},
+		{"none", EncryptNone, true},
+		{"aes-gcm", EncryptAESGCM, true},
+		{"chacha20", EncryptChaCha20, true},
+		{"nope", EncryptUnspecified, false},
+	}
+	for _, tc := range encCases {
+		got, err := ParseEncryptType(tc.in)
+		if tc.ok {
+			if err != nil || got != tc.want {
+				t.Fatalf("ParseEncryptType(%q)=%v,%v want %v", tc.in, got, err, tc.want)
+			}
+		} else if err == nil {
+			t.Fatalf("ParseEncryptType(%q) expected error", tc.in)
+		}
+	}
+}
+
 func TestNegotiateCodec(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Encrypt = "wire-key"
@@ -459,4 +504,62 @@ func TestSetCongestion(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Congestion = "bbr"
 	setCongestion(conn, cfg)
+}
+
+// Regression for 85e5c30: RecvFrame must not size-boost small DATA to prioInter.
+// A trailing ≤4096 chunk jumping ahead of an earlier bulk chunk of the same
+// stream breaks sendToSonny Index order (偶现 index error / 代理异常).
+func TestRecvFrame_DataKeepsFIFO(t *testing.T) {
+	pc := &ProxyConn{recvq: newPrioQueue(16)}
+
+	large := &ProxyFrame{
+		Type: FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{
+			Id:    "s1",
+			Index: 1,
+			Data:  bytes.Repeat([]byte("L"), 8192),
+		},
+	}
+	small := &ProxyFrame{
+		Type: FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{
+			Id:    "s1",
+			Index: 2,
+			Data:  bytes.Repeat([]byte("S"), 1024),
+		},
+	}
+	pc.RecvFrame(large)
+	pc.RecvFrame(small)
+
+	got := make([]int32, 0, 2)
+	for i := 0; i < 2; i++ {
+		v, closed, ok := pc.recvq.PopWait(time.Second)
+		if !ok || closed {
+			t.Fatalf("pop %d: ok=%v closed=%v", i, ok, closed)
+		}
+		got = append(got, v.(*ProxyFrame).DataFrame.Index)
+	}
+	if got[0] != 1 || got[1] != 2 {
+		t.Fatalf("DATA reordered on recvq: got indexes %v, want [1 2]", got)
+	}
+}
+
+func TestRecvFrame_ControlStillJumpsAheadOfData(t *testing.T) {
+	pc := &ProxyConn{recvq: newPrioQueue(16)}
+	pc.RecvFrame(&ProxyFrame{
+		Type:      FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{Id: "s1", Index: 1, Data: []byte("bulk")},
+	})
+	pc.RecvFrame(&ProxyFrame{
+		Type:       FRAME_TYPE_CLOSE,
+		CloseFrame: &CloseFrame{Id: "s1"},
+	})
+
+	v, closed, ok := pc.recvq.PopWait(time.Second)
+	if !ok || closed {
+		t.Fatalf("pop: ok=%v closed=%v", ok, closed)
+	}
+	if v.(*ProxyFrame).Type != FRAME_TYPE_CLOSE {
+		t.Fatalf("control should still jump ahead of DATA, got %v", v.(*ProxyFrame).Type)
+	}
 }
