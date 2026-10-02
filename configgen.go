@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -41,7 +42,7 @@ func randomSecret() (string, error) {
 }
 
 func ptrString(s string) *string { return &s }
-func ptrInt(v int) *int       { return &v }
+func ptrInt(v int) *int          { return &v }
 
 // defaultListenAddr returns a sensible listen address for each underlay proto.
 func defaultListenAddr(proto string, index int) string {
@@ -72,20 +73,20 @@ func defaultServerAddr(proto, host string, index int) string {
 	case "ricmp":
 		return host
 	default:
-		listen := defaultListenAddr(proto, index)
-		if strings.HasPrefix(listen, ":") {
-			return host + listen
-		}
-		return netJoinHostPort(host, listen)
+		return netJoinHostPort(host, defaultListenAddr(proto, index))
 	}
 }
 
+// netJoinHostPort joins host with the port taken from a listen addr such as
+// ":8888", "[::]:8888" or "0.0.0.0:8888". Addrs without a port (e.g. ricmp's
+// "0.0.0.0") are returned unchanged. Using net.JoinHostPort keeps IPv6
+// literals correctly bracketed ("[::1]:8888").
 func netJoinHostPort(host, addr string) string {
-	// addr may already be host:port; keep simple for our generated listens.
-	if strings.Contains(addr, ":") && !strings.HasPrefix(addr, ":") {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
 		return addr
 	}
-	return host + addr
+	return net.JoinHostPort(host, port)
 }
 
 func allMainProtos() []string {

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net"
 	"os"
 	"strings"
 	"sync"
@@ -198,7 +199,7 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 			loggo.Info("Outputer ss no env %s %s", ss_local_host, ss_local_port)
 			return
 		}
-		targetAddr = ss_local_host + ":" + ss_local_port
+		targetAddr = net.JoinHostPort(ss_local_host, ss_local_port)
 	}
 
 	size := o.sonnySize()

@@ -8,8 +8,8 @@ github.com/cncf/udpa/go v0.0.0-20191209042840-269d4d468f6f/go.mod h1:M8M6+tZqaGX
 github.com/envoyproxy/go-control-plane v0.9.0/go.mod h1:YTl/9mNaCwkRvm6d1a2C3ymFceY/DCBVvsKhRF0iEA4=
 github.com/envoyproxy/go-control-plane v0.9.4/go.mod h1:6rpuAdCZL397s3pYoYcLgu1mIlRU8Am5FuJP05cCM98=
 github.com/envoyproxy/protoc-gen-validate v0.1.0/go.mod h1:iSmxcyjqTsJpI2R4NaDN7+kN2VEUnK/pcBlmesArF7c=
-github.com/esrrhs/gohome v0.0.0-20260924052417-f7be2b22a03d h1:Yoc9r+G74ZWEW1XvBgP83UwMNoIUojQ8s5VeOQVWTdA=
-github.com/esrrhs/gohome v0.0.0-20260924052417-f7be2b22a03d/go.mod h1:tRLY2j9CjI+uML7QckSSpQPs4Tgc+isNTf7g5TMyhLo=
+github.com/esrrhs/gohome v0.0.0-20261002003618-c163b37d7f64 h1:iFDiwd3UzL/PlTrRAqMQbeOEZhk6jHxIuIlplNhHRdo=
+github.com/esrrhs/gohome v0.0.0-20261002003618-c163b37d7f64/go.mod h1:tRLY2j9CjI+uML7QckSSpQPs4Tgc+isNTf7g5TMyhLo=
 github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b/go.mod h1:SBH7ygxi8pfUlaOkMMuAQtPIUF8ecWP5IEl/CR7VP2Q=
 github.com/golang/mock v1.1.1/go.mod h1:oTYuIxOrZwtPieC+H1uAHpcLFnEyAGVDL/k47Jfbm0A=
 github.com/golang/protobuf v1.2.0/go.mod h1:6lQm79b+lXiMfvg/cZm0SGofjICqVBUtrP5yJMmIC1U=

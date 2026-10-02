@@ -275,7 +275,9 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 
 	// SOCKS5 CONNECT
 	// Sending connection established message immediately to client.
-	err = network.Sock5SendConnectReply(proxyConn.conn, 0, "0.0.0.0:0")
+	// Reply BND.ADDR uses the unspecified address of the client's address
+	// family so IPv6 SOCKS5 clients receive an ATYP IP6 reply.
+	err = network.Sock5SendConnectReply(proxyConn.conn, 0, socks5ZeroBind(proxyConn.conn))
 	if err != nil {
 		loggo.Error("processSocks5Conn Write %s %s", proxyConn.conn.Info(), err)
 		proxyConn.closeConn()

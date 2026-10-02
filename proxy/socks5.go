@@ -25,6 +25,80 @@ type socks5UDPTunnel struct {
 	recvIndex  int32
 }
 
+// socks5ControlLocalHost returns the local host of the SOCKS5 TCP control
+// connection, i.e. the proxy address the client is connected to. It returns
+// "" when it cannot be derived from the connection info string.
+func socks5ControlLocalHost(tcpConn network.Conn) string {
+	if tcpConn == nil {
+		return ""
+	}
+	parts := strings.Split(tcpConn.Info(), "<--")
+	if len(parts) == 0 {
+		return ""
+	}
+	h, _, err := net.SplitHostPort(strings.TrimSpace(parts[0]))
+	if err != nil {
+		return ""
+	}
+	return h
+}
+
+// socks5HostIsIPv6 reports whether host is a literal IPv6 address. IPv4-mapped
+// IPv6 addresses (e.g. ::ffff:127.0.0.1 on a dual-stack socket) count as IPv4.
+// An optional IPv6 zone (e.g. fe80::1%eth0) is stripped before parsing.
+func socks5HostIsIPv6(host string) bool {
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.To4() == nil
+}
+
+// socks5RelayBindAddr returns the wildcard UDP bind address matching the
+// address family of the SOCKS5 TCP control connection: IPv6 clients need an
+// IPv6-capable relay socket, IPv4 clients keep the IPv4 wildcard.
+func socks5RelayBindAddr(tcpConn network.Conn) string {
+	if socks5HostIsIPv6(socks5ControlLocalHost(tcpConn)) {
+		return "[::]:0"
+	}
+	return "0.0.0.0:0"
+}
+
+// socks5ZeroBind returns the RFC 1928 unspecified BND.ADDR (used in CONNECT /
+// UDP ASSOCIATE replies) matching the control connection address family.
+func socks5ZeroBind(tcpConn network.Conn) string {
+	if socks5HostIsIPv6(socks5ControlLocalHost(tcpConn)) {
+		return "[::]:0"
+	}
+	return "0.0.0.0:0"
+}
+
+// socks5RelayHost returns the reachable relay host for SOCKS5 clients: the
+// control connection's concrete local address, or the loopback address of the
+// matching address family when the listener is bound to a wildcard address.
+// IPv6 zones are stripped (RFC 1928 ATYP IP6 cannot carry a zone).
+func socks5RelayHost(tcpConn network.Conn) string {
+	host := socks5ControlLocalHost(tcpConn)
+	ipHost := host
+	if i := strings.IndexByte(ipHost, '%'); i >= 0 {
+		ipHost = ipHost[:i]
+	}
+	if ip := net.ParseIP(ipHost); ip != nil {
+		if ip.IsUnspecified() {
+			if ip.To4() != nil {
+				return "127.0.0.1"
+			}
+			return "::1"
+		}
+		// Normalize IPv4-mapped IPv6 addresses (dual-stack sockets) to IPv4.
+		if v4 := ip.To4(); v4 != nil {
+			return v4.String()
+		}
+		return ipHost
+	}
+	return "127.0.0.1"
+}
+
 func getSocks5RelayAddr(listenAddr net.Addr, tcpConn network.Conn) string {
 	port := 0
 	if udpAddr, ok := listenAddr.(*net.UDPAddr); ok {
@@ -36,31 +110,17 @@ func getSocks5RelayAddr(listenAddr net.Addr, tcpConn network.Conn) string {
 		}
 	}
 
-	host := "127.0.0.1"
-	if tcpConn != nil {
-		info := tcpConn.Info()
-		parts := strings.Split(info, "<--")
-		if len(parts) > 0 {
-			h, _, err := net.SplitHostPort(strings.TrimSpace(parts[0]))
-			if err == nil && h != "" {
-				ip := net.ParseIP(h)
-				if ip != nil && !ip.IsUnspecified() {
-					host = h
-				}
-			}
-		}
-	}
-	return net.JoinHostPort(host, strconv.Itoa(port))
+	return net.JoinHostPort(socks5RelayHost(tcpConn), strconv.Itoa(port))
 }
 
 func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget string) error {
-	udpAddr, err := net.ResolveUDPAddr("udp", "0.0.0.0:0")
+	udpAddr, err := net.ResolveUDPAddr("udp", socks5RelayBindAddr(tcpProxyConn.conn))
 	if err != nil {
 		return err
 	}
 	udpListener, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		_ = network.Sock5SendConnectReply(tcpProxyConn.conn, 0x01, "0.0.0.0:0")
+		_ = network.Sock5SendConnectReply(tcpProxyConn.conn, 0x01, socks5ZeroBind(tcpProxyConn.conn))
 		return err
 	}
 
