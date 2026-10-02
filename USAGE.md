@@ -26,6 +26,7 @@ This document provides a comprehensive guide on configuring, running, and deploy
 - [Command Line Reference](#command-line-reference)
 - [Docker Deployment](#docker-deployment)
 - [Graceful Shutdown](#graceful-shutdown)
+- [IPv6 Support](#ipv6-support)
 
 ---
 
@@ -384,3 +385,46 @@ SPP handles OS termination signals (`SIGINT`, `SIGTERM`, `Ctrl+C`). Upon receivi
 2. Gracefully terminate active sub-connections and close listeners.
 3. Notify the remote server/client to release allocated resources.
 4. Exit cleanly with code `0`.
+
+---
+
+## IPv6 Support
+
+SPP works over IPv6 for all address-bearing options (`-listen`, `-server`,
+`-fromaddr`, `-toaddr`), JSON config fields, and proxy destinations.
+
+* **Bracket IPv6 literals with a port**: `[2001:db8::1]:8888`, `[::1]:1080`.
+  Brackets are required so the colons inside an IPv6 address are not confused
+  with the port separator.
+* **Wildcard listeners are dual-stack**: a bare port (`:8888`) or `[::]:8888`
+  accepts both IPv4 and IPv6 clients on platforms that support dual-stack
+  sockets. Use `0.0.0.0:8888` / `[::1]:8888` to restrict to a single family.
+* **SOCKS5**: CONNECT and UDP ASSOCIATE accept and return RFC 1928
+  `ATYP=IP6` (type `4`) addresses. The UDP relay socket is automatically
+  opened in the same address family as the client's TCP control connection,
+  and the relay address returned to the client is reachable over that family.
+* **HTTP proxy**: `CONNECT [host]:port` and absolute-form requests with
+  bracketed IPv6 targets are supported.
+* **Transit protocols**: all of `tcp`, `rudp`, `kcp`, `quic`, `rhttp`, and
+  `ricmp` run over both IPv4 and IPv6. Because ICMP carries no port, `ricmp`
+  addresses are host-only: on the client use a bare IPv6 literal without
+  brackets (`-server 2001:db8::1`, or a link-local form such as
+  `fe80::1%eth0`). On the server, `-listen 0.0.0.0` / `-listen ::` opens both
+  an `ip4:icmp` and an `ip6:icmp` socket, `-listen ::1` restricts to IPv6, and
+  `-listen 127.0.0.1` restricts to IPv4. Like IPv4, ICMPv6 raw sockets require
+  root / `CAP_NET_RAW`; if one family cannot be opened, the other still
+  listens.
+
+Examples:
+
+```bash
+# dual-stack server
+./spp -type server -proto tcp -listen :8888
+
+# SOCKS5 client reaching an IPv6 server, exposing the proxy on IPv6 loopback
+./spp -type socks5_client -proto tcp -server '[2001:db8::1]:8888' \
+  -fromaddr '[::1]:1080' -proxyproto tcp -key 'your-auth-key'
+
+# use it with an IPv6-aware client
+curl -x 'socks5h://[::1]:1080' 'http://[2001:db8::2]:80/'
+```

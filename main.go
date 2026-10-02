@@ -448,7 +448,7 @@ func main() {
 	}
 
 	if *profile > 0 {
-		go http.ListenAndServe("0.0.0.0:"+strconv.Itoa(*profile), nil)
+		go http.ListenAndServe(":"+strconv.Itoa(*profile), nil)
 	}
 
 	// Wait for OS termination signal to gracefully shut down
