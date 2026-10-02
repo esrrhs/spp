@@ -3,7 +3,7 @@ module github.com/esrrhs/spp
 go 1.26.0
 
 require (
-	github.com/esrrhs/gohome v0.0.0-20261002094438-c11f1e8c590c
+	github.com/esrrhs/gohome v0.0.0-20261002131301-05bef5471df9
 	golang.org/x/crypto v0.57.0
 	google.golang.org/protobuf v1.36.12
 )
