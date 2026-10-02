@@ -104,7 +104,7 @@ func NewClient(config *Config, serverprotos []string, servers []string, name str
 		if cn == nil {
 			return nil, err
 		}
-		setCongestion(cn, config)
+		setUnderlayTuning(cn, config)
 		cn.Close()
 	}
 
@@ -178,7 +178,7 @@ func (c *Client) connect() error {
 					loggo.Error("connect NewConn fail: %s %s %v", proto, addr, err)
 					continue
 				}
-				setCongestion(dialer, c.config)
+				setUnderlayTuning(dialer, c.config)
 				targetconn, err := dialWithTimeout(dialer, addr, c.config.ConnectTimeout)
 				if err != nil {
 					dialer.Close()

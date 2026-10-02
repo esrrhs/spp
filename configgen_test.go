@@ -113,3 +113,28 @@ func TestRandomSecretNotWeak(t *testing.T) {
 		}
 	}
 }
+
+func TestConfigFileKcpFecFields(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "c.json")
+	content := `{
+		"type": "server",
+		"proto": ["kcp"],
+		"key": "strong-auth-key",
+		"kcpfecdata": 10,
+		"kcpfecparity": 3
+	}`
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadConfigFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.KcpFecData == nil || *cfg.KcpFecData != 10 {
+		t.Fatalf("kcpfecdata not parsed: %+v", cfg.KcpFecData)
+	}
+	if cfg.KcpFecParity == nil || *cfg.KcpFecParity != 3 {
+		t.Fatalf("kcpfecparity not parsed: %+v", cfg.KcpFecParity)
+	}
+}

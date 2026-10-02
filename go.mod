@@ -3,7 +3,7 @@ module github.com/esrrhs/spp
 go 1.26.0
 
 require (
-	github.com/esrrhs/gohome v0.0.0-20261002003618-c163b37d7f64
+	github.com/esrrhs/gohome v0.0.0-20261002131301-05bef5471df9
 	golang.org/x/crypto v0.57.0
 	google.golang.org/protobuf v1.36.12
 )
@@ -22,4 +22,5 @@ require (
 	github.com/xtaci/kcp-go v5.4.20+incompatible // indirect
 	golang.org/x/net v0.59.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/text v0.42.0 // indirect
 )

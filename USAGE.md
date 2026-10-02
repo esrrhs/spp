@@ -201,6 +201,22 @@ External proxy protocols and internal transit protocols can be converted automat
   ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto tcp -proto rhttp
   ```
 
+  RHTTP reuses one pooled HTTP connection per logical tunnel (HTTP/1.1
+  keep-alive; HTTP/2 over TLS for `https://` server addresses). Prefix the
+  server address with `h2c://` to use cleartext HTTP/2 with prior knowledge
+  (the rhttp server accepts both HTTP/1.1 and h2c on the same port), e.g.
+  `-server h2c://www.server.com:8888`.
+
+* **Proxy UDP traffic using KCP transit with forward error correction:**
+  ```bash
+  # Weak-network option: 10 data + 3 parity shards (~30% redundancy) lets
+  # the receiver recover up to 3 lost packets per FEC group without waiting
+  # for a retransmit. MUST be configured identically on client and server;
+  # FEC-enabled endpoints cannot interop with FEC-less ones. Default is off.
+  ./spp -type server -proto kcp -listen :8888 -key <key> -kcpfecdata 10 -kcpfecparity 3
+  ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto kcp -key <key> -kcpfecdata 10 -kcpfecparity 3
+  ```
+
 ---
 
 ## Configuration File
@@ -259,6 +275,8 @@ Then:
 | `noprint` | integer | `1` to suppress stdout logs, `0` to print |
 | `maxclient` | integer | Maximum concurrent client connections |
 | `maxconn` | integer | Maximum sub-connections |
+| `kcpfecdata` | integer | KCP FEC data shards (e.g. `10`); `0` disables FEC. Must match on both ends |
+| `kcpfecparity` | integer | KCP FEC parity shards (e.g. `3`); `0` disables FEC. `kcpfecdata` + `kcpfecparity` must not exceed 256 |
 
 ### Server Example
 
