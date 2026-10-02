@@ -20,16 +20,16 @@ import (
 
 // e2eHarness boots a proxy pair for E2E scenarios.
 type e2eHarness struct {
-	t            *testing.T
-	proto        string
-	cfg          *Config
-	echoAddr     string
-	stopEcho     func()
-	serverAddrs  []string
-	clientAddr   string // local listen (PROXY/SOCKS5/HTTP fromaddr) or reverse expose addr
-	server       *Server
-	client       *Client
-	mode         string
+	t           *testing.T
+	proto       string
+	cfg         *Config
+	echoAddr    string
+	stopEcho    func()
+	serverAddrs []string
+	clientAddr  string // local listen (PROXY/SOCKS5/HTTP fromaddr) or reverse expose addr
+	server      *Server
+	client      *Client
+	mode        string
 }
 
 func freeListenAddr(t *testing.T, proto string) string {
@@ -414,23 +414,60 @@ func socks5ConnectErr(proxyAddr, targetAddr string, timeout time.Duration) (net.
 		conn.Close()
 		return nil, fmt.Errorf("resolve: %w", err)
 	}
-	ip4 := tcpAddr.IP.To4()
-	if ip4 == nil {
-		ip4 = net.IPv4(127, 0, 0, 1)
+	if ip4 := tcpAddr.IP.To4(); ip4 != nil {
+		req := []byte{0x05, 0x01, 0x00, 0x01}
+		req = append(req, ip4...)
+		pb := make([]byte, 2)
+		binary.BigEndian.PutUint16(pb, uint16(tcpAddr.Port))
+		req = append(req, pb...)
+		if _, err := conn.Write(req); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5 connect: %w", err)
+		}
+	} else {
+		req := make([]byte, 0, 22)
+		req = append(req, 0x05, 0x01, 0x00, 0x04) // VER CMD RSV ATYP=IP6
+		req = append(req, tcpAddr.IP.To16()...)
+		pb := make([]byte, 2)
+		binary.BigEndian.PutUint16(pb, uint16(tcpAddr.Port))
+		req = append(req, pb...)
+		if _, err := conn.Write(req); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5 connect: %w", err)
+		}
 	}
-	req := []byte{0x05, 0x01, 0x00, 0x01}
-	req = append(req, ip4...)
-	pb := make([]byte, 2)
-	binary.BigEndian.PutUint16(pb, uint16(tcpAddr.Port))
-	req = append(req, pb...)
-	if _, err := conn.Write(req); err != nil {
+	// RFC 1928 reply: VER REP RSV ATYP BND.ADDR BND.PORT. BND.ADDR size
+	// depends on ATYP (4 for IPv4, 16 for IPv6, 1+len for domain), so the
+	// reply must be parsed rather than read as a fixed 10-byte block.
+	crh := make([]byte, 4)
+	if _, err := io.ReadFull(conn, crh); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("socks5 connect: %w", err)
+		return nil, fmt.Errorf("socks5 connect resp hdr: %w", err)
 	}
-	cr := make([]byte, 10)
-	if _, err := io.ReadFull(conn, cr); err != nil || cr[1] != 0x00 {
+	bndLen := 0
+	switch crh[3] {
+	case 0x01:
+		bndLen = 4
+	case 0x04:
+		bndLen = 16
+	case 0x03:
+		var dlen [1]byte
+		if _, err := io.ReadFull(conn, dlen[:]); err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("socks5 connect resp bnd len: %w", err)
+		}
+		bndLen = int(dlen[0])
+	default:
 		conn.Close()
-		return nil, fmt.Errorf("socks5 connect resp: %v %v", cr, err)
+		return nil, fmt.Errorf("socks5 connect resp unknown atyp 0x%02x", crh[3])
+	}
+	if _, err := io.ReadFull(conn, make([]byte, bndLen+2)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("socks5 connect resp bnd: %w", err)
+	}
+	if crh[1] != 0x00 {
+		conn.Close()
+		return nil, fmt.Errorf("socks5 connect rep=0x%02x", crh[1])
 	}
 	_ = conn.SetDeadline(time.Time{})
 	return conn, nil

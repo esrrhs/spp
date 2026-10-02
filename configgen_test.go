@@ -80,6 +80,22 @@ func TestDefaultListenAndServerAddrs(t *testing.T) {
 	if got := defaultServerAddr("ricmp", "127.0.0.1", 0); got != "127.0.0.1" {
 		t.Fatalf("ricmp server=%s", got)
 	}
+	// ricmp is host-only: an IPv6 server stays a bare literal (no port,
+	// no brackets) because net.ResolveIPAddr rejects "[::1]".
+	if got := defaultServerAddr("ricmp", "::1", 0); got != "::1" {
+		t.Fatalf("ricmp ipv6 server=%s", got)
+	}
+	// IPv6 literals must be bracketed.
+	if got := defaultServerAddr("tcp", "::1", 0); got != "[::1]:8888" {
+		t.Fatalf("tcp ipv6 server=%s", got)
+	}
+	if got := netJoinHostPort("::1", "[::]:8888"); got != "[::1]:8888" {
+		t.Fatalf("ipv6 join=%s", got)
+	}
+	// Addrs without a port (ricmp wildcard) are returned unchanged.
+	if got := netJoinHostPort("::1", "0.0.0.0"); got != "0.0.0.0" {
+		t.Fatalf("no-port join=%s", got)
+	}
 }
 
 func TestRandomSecretNotWeak(t *testing.T) {
