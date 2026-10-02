@@ -19,29 +19,31 @@ import (
 )
 
 type Config struct {
-	MaxMsgSize                int          // 消息最大长度
-	MainBuffer                int          // 主通道buffer最大长度
-	ConnBuffer                int          // 每个conn buffer最大长度
-	EstablishedTimeout        int          // sonny 等业务连接建立超时
-	AuthTimeout               int          // 主通道登录/鉴权超时；超时未 established 则踢掉
-	PingInter                 int          // 主通道ping间隔
-	PingTimeoutInter          int          // 主通道ping超时间隔
-	ConnTimeout               int          // 每个conn的不活跃超时时间
-	ConnectTimeout            int          // 每个conn的连接超时
-	Key                       string       // 鉴权密钥，必须显式配置，无弱默认
-	Encrypt                   string       // 加密密钥，空表示关闭加密，无弱默认
-	EncryptType               ENCRYPT_TYPE // 加密算法，默认 ChaCha20-Poly1305（整帧 AEAD）
-	Compress                  int          // 压缩阈值，0 表示关闭
+	MaxMsgSize                int           // 消息最大长度
+	MainBuffer                int           // 主通道buffer最大长度
+	ConnBuffer                int           // 每个conn buffer最大长度
+	EstablishedTimeout        int           // sonny 等业务连接建立超时
+	AuthTimeout               int           // 主通道登录/鉴权超时；超时未 established 则踢掉
+	PingInter                 int           // 主通道ping间隔
+	PingTimeoutInter          int           // 主通道ping超时间隔
+	ConnTimeout               int           // 每个conn的不活跃超时时间
+	ConnectTimeout            int           // 每个conn的连接超时
+	Key                       string        // 鉴权密钥，必须显式配置，无弱默认
+	Encrypt                   string        // 加密密钥，空表示关闭加密，无弱默认
+	EncryptType               ENCRYPT_TYPE  // 加密算法，默认 ChaCha20-Poly1305（整帧 AEAD）
+	Compress                  int           // 压缩阈值，0 表示关闭
 	CompressType              COMPRESS_TYPE // 压缩算法，默认 ZSTD
-	ShowPing                  bool         // 是否显示ping
-	Username                  string       // 登录用户名
-	Password                  string       // 登录密码
-	MaxClient                 int          // 最大客户端数目
-	MaxSonny                  int          // 最大连接数目
-	MainWriteChannelTimeoutMs int          // 主通道转发消息超时
-	Congestion                string       // 拥塞算法
-	ProbeInter                int          // 多通道测速间隔（秒）
-	ProbeSize                 int          // 测速 payload 字节数
+	ShowPing                  bool          // 是否显示ping
+	Username                  string        // 登录用户名
+	Password                  string        // 登录密码
+	MaxClient                 int           // 最大客户端数目
+	MaxSonny                  int           // 最大连接数目
+	MainWriteChannelTimeoutMs int           // 主通道转发消息超时
+	Congestion                string        // 拥塞算法
+	ProbeInter                int           // 多通道测速间隔（秒）
+	ProbeSize                 int           // 测速 payload 字节数
+	KcpFecDataShards          int           // KCP FEC 数据分片数，0 关闭 FEC；启用时客户端与服务端必须配置一致
+	KcpFecParityShards        int           // KCP FEC 校验分片数，0 关闭 FEC（如 10 数据 +3 校验，约 30% 冗余）
 }
 
 func DefaultConfig() *Config {
@@ -86,6 +88,15 @@ func ValidateConfig(cfg *Config) error {
 	if cfg.Encrypt != "" && isWeakSecret(cfg.Encrypt) {
 		return errors.New("encrypt key (-encrypt) is a known weak default; set a strong key or leave empty to disable")
 	}
+	// KCP FEC is opt-in and changes the wire framing: both shard counts
+	// must be positive together and their total must stay within the
+	// Reed-Solomon 256-shard limit. FEC-enabled peers cannot interop with
+	// FEC-less peers, so the default (0,0) keeps legacy compatibility.
+	if (cfg.KcpFecDataShards < 0 || cfg.KcpFecParityShards < 0) ||
+		(cfg.KcpFecDataShards == 0) != (cfg.KcpFecParityShards == 0) ||
+		cfg.KcpFecDataShards+cfg.KcpFecParityShards > 256 {
+		return errors.New("invalid KCP FEC shards: both kcp_fec_data_shards and kcp_fec_parity_shards must be 0 or positive together, and their sum must not exceed 256")
+	}
 	return nil
 }
 
@@ -110,8 +121,8 @@ type ProxyConn struct {
 	sendq *prioQueue
 	recvq *prioQueue
 	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
-	sendch *msgChannel
-	recvch *msgChannel
+	sendch            *msgChannel
+	recvch            *msgChannel
 	actived           int32
 	pinged            int32
 	sentBytes         int64
@@ -947,4 +958,25 @@ func setCongestion(c network.Conn, config *Config) {
 		cf.Congestion = config.Congestion
 		c.(*network.RicmpConn).SetConfig(cf)
 	}
+}
+
+// setKcpConfig applies the optional KCP forward-error-correction shard
+// configuration before Listen/Dial. Defaults (0,0) leave FEC disabled.
+// FEC wire framing is not backward compatible, so client and server must
+// configure identical shard counts.
+func setKcpConfig(c network.Conn, config *Config) {
+	if c.Name() != "kcp" {
+		return
+	}
+	c.(*network.KcpConn).SetConfig(&network.KcpConfig{
+		DataShards:   config.KcpFecDataShards,
+		ParityShards: config.KcpFecParityShards,
+	})
+}
+
+// setUnderlayTuning applies all spp-side underlay tuning (congestion
+// control, KCP FEC) to a freshly constructed conn.
+func setUnderlayTuning(c network.Conn, config *Config) {
+	setCongestion(c, config)
+	setKcpConfig(c, config)
 }

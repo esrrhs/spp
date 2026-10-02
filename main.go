@@ -116,6 +116,8 @@ type ConfigFile struct {
 	Password     string   `json:"password,omitempty"`
 	MaxClient    *int     `json:"maxclient,omitempty"`
 	MaxConn      *int     `json:"maxconn,omitempty"`
+	KcpFecData   *int     `json:"kcpfecdata,omitempty"`
+	KcpFecParity *int     `json:"kcpfecparity,omitempty"`
 }
 
 func loadConfigFile(filePath string) (*ConfigFile, error) {
@@ -168,6 +170,8 @@ func main() {
 	password := flag.String("password", "", "socks5 password")
 	maxclient := flag.Int("maxclient", 10000, "max client connection")
 	maxconn := flag.Int("maxconn", 10240, "max connection")
+	kcpfecdata := flag.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
+	kcpfecparity := flag.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
 
 	flag.Parse()
 
@@ -267,6 +271,12 @@ func main() {
 		}
 		if !cliSet["maxconn"] && fileCfg.MaxConn != nil {
 			*maxconn = *fileCfg.MaxConn
+		}
+		if !cliSet["kcpfecdata"] && fileCfg.KcpFecData != nil {
+			*kcpfecdata = *fileCfg.KcpFecData
+		}
+		if !cliSet["kcpfecparity"] && fileCfg.KcpFecParity != nil {
+			*kcpfecparity = *fileCfg.KcpFecParity
 		}
 	}
 
@@ -397,6 +407,8 @@ func main() {
 	config.Password = *password
 	config.MaxClient = *maxclient
 	config.MaxSonny = *maxconn
+	config.KcpFecDataShards = *kcpfecdata
+	config.KcpFecParityShards = *kcpfecparity
 
 	ct, err := proxy.ParseCompressType(*compresstype)
 	if err != nil {
