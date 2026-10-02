@@ -420,3 +420,28 @@ func TestE2E_Underlay_RhttpAndRicmp(t *testing.T) {
 		})
 	}
 }
+
+// TestE2E_KcpFecEnabled runs a full forward-proxy round trip with KCP
+// Reed-Solomon FEC (10+3) configured identically on both ends. FEC changes
+// the kcp wire framing, so this guards the spp-side config plumbing from the
+// flags/Config all the way into the underlay conns on both peers.
+func TestE2E_KcpFecEnabled(t *testing.T) {
+	cfg := testConfig("kcp-fec-e2e-secret")
+	cfg.AuthTimeout = 20
+	cfg.KcpFecDataShards = 10
+	cfg.KcpFecParityShards = 3
+	if err := ValidateConfig(cfg); err != nil {
+		t.Fatalf("ValidateConfig: %v", err)
+	}
+
+	h := startForwardProxyCfg(t, "kcp", cfg)
+	defer h.Close()
+
+	// A multi-KB payload spans many KCP segments so the FEC encoder/decoder
+	// actually groups and recovers shards rather than only seeing one packet.
+	payload := make([]byte, 256*1024)
+	fillPattern(payload, 7)
+	conn := h.Dial(20 * time.Second)
+	defer conn.Close()
+	echoAndHash(t, conn, payload, 60*time.Second)
+}

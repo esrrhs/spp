@@ -87,7 +87,7 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 			return nil, err
 		}
 
-		setCongestion(conn, config)
+		setUnderlayTuning(conn, config)
 
 		listenConn, err := conn.Listen(listenaddrs[i])
 		if err != nil {

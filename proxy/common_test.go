@@ -356,6 +356,41 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.MaxClient <= 0 || cfg.MaxSonny <= 0 {
 		t.Errorf("invalid default limits: client=%d, sonny=%d", cfg.MaxClient, cfg.MaxSonny)
 	}
+	if cfg.KcpFecDataShards != 0 || cfg.KcpFecParityShards != 0 {
+		t.Errorf("KCP FEC must default off for wire compat: data=%d parity=%d", cfg.KcpFecDataShards, cfg.KcpFecParityShards)
+	}
+}
+
+func TestValidateConfigKcpFec(t *testing.T) {
+	cases := []struct {
+		name   string
+		data   int
+		parity int
+		ok     bool
+	}{
+		{"disabled", 0, 0, true},
+		{"enabled 10+3", 10, 3, true},
+		{"parity without data", 0, 3, false},
+		{"data without parity", 10, 0, false},
+		{"negative", -1, 0, false},
+		{"overflow 256", 200, 200, false},
+		{"boundary 256", 253, 3, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Key = "strong-auth-key"
+			cfg.KcpFecDataShards = tc.data
+			cfg.KcpFecParityShards = tc.parity
+			err := ValidateConfig(cfg)
+			if tc.ok && err != nil {
+				t.Fatalf("expected valid, got: %v", err)
+			}
+			if !tc.ok && err == nil {
+				t.Fatalf("expected invalid FEC config data=%d parity=%d", tc.data, tc.parity)
+			}
+		})
+	}
 }
 
 func TestParseCompressEncryptTypes(t *testing.T) {
