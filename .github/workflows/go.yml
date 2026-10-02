@@ -81,6 +81,31 @@ jobs:
               "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestE2E_Netem_LossReorder$'
           fi
 
+  e2e-ipv6-ricmp:
+    name: E2E IPv6 ricmp
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: 'go.mod'
+
+      # IPv6 raw ICMP (ip6:icmp) needs CAP_NET_RAW, granted via setcap like
+      # the IPv4 ricmp matrix shard; without it the test would skip itself.
+      - name: IPv6 ricmp e2e (CAP_NET_RAW)
+        run: |
+          set -euo pipefail
+          go test -c -o "${RUNNER_TEMP}/proxy.test" ./proxy/
+          if sudo setcap cap_net_raw+ep "${RUNNER_TEMP}/proxy.test" 2>/dev/null; then
+            "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestE2E_IPv6_RICMP_ForwardProxy$'
+          else
+            sudo --preserve-env=PATH,GOROOT,GOPATH,HOME,GOCACHE,GOMODCACHE,GOPROXY \
+              "${RUNNER_TEMP}/proxy.test" -test.v -test.count=1 -test.timeout=10m -test.run '^TestE2E_IPv6_RICMP_ForwardProxy$'
+          fi
+
   e2e-matrix:
     name: E2E ${{ matrix.underlay }}
     runs-on: ubuntu-latest
