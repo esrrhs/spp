@@ -109,6 +109,16 @@ func getFreeV6Port(t *testing.T) int {
 	return l.Addr().(*net.TCPAddr).Port
 }
 
+func getFreeV6UDPPort(t *testing.T) int {
+	t.Helper()
+	l, err := net.ListenPacket("udp", "[::1]:0")
+	if err != nil {
+		t.Skipf("IPv6 loopback unavailable: %v", err)
+	}
+	defer l.Close()
+	return l.LocalAddr().(*net.UDPAddr).Port
+}
+
 func startTCP6EchoServer(t *testing.T) (string, func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "[::1]:0")
@@ -167,35 +177,53 @@ func startUDP6EchoServer(t *testing.T) (string, func()) {
 	}
 }
 
+// v6UnderlayListenAddr returns the IPv6 listen/dial address of an underlay
+// proto. ricmp carries no port and stays a bare host literal; UDP-based
+// underlays grab a free UDP port, the rest a TCP port.
+func v6UnderlayAddr(t *testing.T, proto string) string {
+	t.Helper()
+	if proto == "ricmp" {
+		return "::1"
+	}
+	var port int
+	switch proto {
+	case "rudp", "kcp", "quic":
+		port = getFreeV6UDPPort(t)
+	default:
+		port = getFreeV6Port(t)
+	}
+	return net.JoinHostPort("::1", strconv.Itoa(port))
+}
+
 // startIPv6Mode boots a fully IPv6 (underlay + local listener + target)
-// proxy pair for PROXY/SOCKS5/HTTP modes.
-func startIPv6Mode(t *testing.T, mode string) *e2eHarness {
+// proxy pair for PROXY/SOCKS5/HTTP modes over the given underlay proto.
+func startIPv6Mode(t *testing.T, mode, proto string) *e2eHarness {
 	t.Helper()
 	skipIfNoIPv6(t)
 
-	h := &e2eHarness{t: t, proto: "tcp", mode: mode}
-	h.cfg = testConfig("test-ipv6-secret-" + strings.ToLower(mode))
+	h := &e2eHarness{t: t, proto: proto, mode: mode}
+	h.cfg = testConfig("test-ipv6-secret-" + strings.ToLower(mode) + "-" + proto)
 	h.echoAddr, h.stopEcho = startTCP6EchoServer(t)
 
-	h.serverAddrs = []string{net.JoinHostPort("::1", strconv.Itoa(getFreeV6Port(t)))}
+	h.serverAddrs = []string{v6UnderlayAddr(t, proto)}
 	h.clientAddr = net.JoinHostPort("::1", strconv.Itoa(getFreeV6Port(t)))
 
 	var err error
-	h.server, err = NewServer(h.cfg, []string{"tcp"}, h.serverAddrs)
+	h.server, err = NewServer(h.cfg, []string{proto}, h.serverAddrs)
 	if err != nil {
 		h.stopEcho()
-		t.Fatalf("NewServer v6: %v", err)
+		t.Fatalf("NewServer v6 %s: %v", proto, err)
 	}
 
 	var toAddrs []string
 	if mode == "PROXY" {
 		toAddrs = []string{h.echoAddr}
 	}
-	h.client, err = NewClient(h.cfg, []string{"tcp"}, h.serverAddrs, "e2e_ipv6_"+mode,
+	h.client, err = NewClient(h.cfg, []string{proto}, h.serverAddrs, "e2e_ipv6_"+mode+"_"+proto,
 		mode, []string{"tcp"}, []string{h.clientAddr}, toAddrs)
 	if err != nil {
 		h.Close()
-		t.Fatalf("NewClient v6(%s): %v", mode, err)
+		t.Fatalf("NewClient v6(%s/%s): %v", mode, proto, err)
 	}
 
 	conn, err := waitForPort(h.clientAddr, 10*time.Second)
@@ -208,7 +236,7 @@ func startIPv6Mode(t *testing.T, mode string) *e2eHarness {
 }
 
 func TestE2E_IPv6_TCP_ForwardProxy(t *testing.T) {
-	h := startIPv6Mode(t, "PROXY")
+	h := startIPv6Mode(t, "PROXY", "tcp")
 	defer h.Close()
 
 	c := h.Dial(5 * time.Second)
@@ -217,7 +245,7 @@ func TestE2E_IPv6_TCP_ForwardProxy(t *testing.T) {
 }
 
 func TestE2E_IPv6_SOCKS5Connect(t *testing.T) {
-	h := startIPv6Mode(t, "SOCKS5")
+	h := startIPv6Mode(t, "SOCKS5", "tcp")
 	defer h.Close()
 
 	// Request the IPv6 echo target with ATYP=IP6 (socks5Connect encodes
@@ -228,12 +256,29 @@ func TestE2E_IPv6_SOCKS5Connect(t *testing.T) {
 }
 
 func TestE2E_IPv6_HTTPConnect(t *testing.T) {
-	h := startIPv6Mode(t, "HTTP")
+	h := startIPv6Mode(t, "HTTP", "tcp")
 	defer h.Close()
 
 	c := httpConnect(t, h.clientAddr, h.echoAddr, "", "", 5*time.Second)
 	defer c.Close()
 	echoAndHash(t, c, []byte("hello spp over ipv6 http connect"), 5*time.Second)
+}
+
+// TestE2E_IPv6_UnderlayMatrix exercises every non-privileged reliable
+// underlay over a pure IPv6 path. On Linux the rudp case also covers the
+// sendmmsg batch path with AF_INET6 destination sockaddrs.
+func TestE2E_IPv6_UnderlayMatrix(t *testing.T) {
+	for _, proto := range []string{"rudp", "kcp", "quic"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			h := startIPv6Mode(t, "PROXY", proto)
+			defer h.Close()
+
+			c := h.Dial(8 * time.Second)
+			defer c.Close()
+			echoAndHash(t, c, []byte("hello spp over "+proto+" over ipv6"), 8*time.Second)
+		})
+	}
 }
 
 func TestE2E_IPv6_SOCKS5UDPAssociate(t *testing.T) {
