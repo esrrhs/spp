@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
-	"errors"
 	"net"
 	"net/url"
 	"strings"
@@ -70,6 +69,12 @@ func parseHost(rawHost, defaultPort string) string {
 	if host, port, err := net.SplitHostPort(rawHost); err == nil {
 		return net.JoinHostPort(host, port)
 	}
+	// A bracketed IPv6 literal without a port ("[::1]") is rejected by
+	// SplitHostPort; strip the brackets first or JoinHostPort would double
+	// them into "[[::1]]:443".
+	if len(rawHost) >= 2 && rawHost[0] == '[' && rawHost[len(rawHost)-1] == ']' {
+		return net.JoinHostPort(rawHost[1:len(rawHost)-1], defaultPort)
+	}
 	return net.JoinHostPort(rawHost, defaultPort)
 }
 
@@ -109,7 +114,12 @@ func (i *Inputer) listenHttp() error {
 	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
-			loggo.Error("Inputer listenHttp accept fail %s %s", i.addr, err.Error())
+			if isExit(i.fwg) {
+				break
+			}
+			// Transient Accept failures (EMFILE etc.) must not tear down the
+			// whole client group; back off and keep accepting.
+			loggo.Debug("Inputer listenHttp accept fail %s %s", i.addr, err.Error())
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
@@ -138,7 +148,9 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 	if proxyConn.conn.Name() != "tcp" {
 		loggo.Error("processHttpConn not tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
 		proxyConn.closeConn()
-		return errors.New("http proxy not tcp")
+		// Per-connection failure: close only this conn. Returning an error to
+		// the root group would tear down the entire proxy.
+		return nil
 	}
 
 	br := bufio.NewReader(proxyConn.conn)
@@ -157,7 +169,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 	if len(parts) < 3 {
 		loggo.Error("processHttpConn invalid reqLine %s: %s", proxyConn.conn.Info(), reqLineTrimmed)
 		proxyConn.closeConn()
-		return errors.New("invalid http request line")
+		return nil
 	}
 
 	method := strings.ToUpper(parts[0])
@@ -171,9 +183,11 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 	for {
 		headerLine, err := br.ReadString('\n')
 		if err != nil {
-			loggo.Error("processHttpConn ReadString header fail %s %v", proxyConn.conn.Info(), err)
+			// Client disconnected (or sent truncated headers): routine on the
+			// open internet. Log at debug and close only this conn.
+			loggo.Debug("processHttpConn ReadString header fail %s %v", proxyConn.conn.Info(), err)
 			proxyConn.closeConn()
-			return err
+			return nil
 		}
 		trimmed := strings.TrimRight(headerLine, "\r\n")
 		if trimmed == "" {
@@ -249,9 +263,9 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		if hostHeader != "" {
 			targetAddr = parseHost(hostHeader, "80")
 		} else {
-			loggo.Error("processHttpConn missing host %s: %s", proxyConn.conn.Info(), reqLineTrimmed)
+			loggo.Info("processHttpConn missing host %s: %s", proxyConn.conn.Info(), reqLineTrimmed)
 			proxyConn.closeConn()
-			return errors.New("missing host in http request")
+			return nil
 		}
 	}
 
