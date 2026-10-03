@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"runtime"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -925,7 +926,67 @@ type State struct {
 var gStateThreadNum StateThreadNum
 var gState State
 
-func showState(wg *thread.Group) error {
+// procStart is the process-local start time, used for status uptime.
+var procStart = time.Now()
+
+// goSafe launches a task on a long-lived root/service group (Client,
+// Server, or the groups owning Inputer/Outputer listeners). Such tasks MUST
+// NOT affect the group's lifetime:
+//
+//   - gohome's thread.Group exits the whole group — and all of its children —
+//     whenever a task returns a non-nil error, so a per-connection handler
+//     returning one would tear down the entire proxy because of a single
+//     malformed request. The func() signature makes that mistake
+//     compile-time: a func() error cannot be passed as f.
+//   - A panic in one connection must not crash the process either: gohome's
+//     CrashLog re-panics after logging. Recover here (full stack logged at
+//     ERROR) so the group keeps serving, mirroring net/http's per-connection
+//     panic isolation.
+//
+// Pipe/conn-scoped goroutines keep using Group.Go with func() error on their
+// own child groups, where returning an error is the intended teardown signal
+// for exactly that pipe or connection.
+func goSafe(g *thread.Group, name string, f func()) {
+	g.Go(name, func() (err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				loggo.Error("goSafe %s recovered from panic: %v\n%s", name, r, debug.Stack())
+				err = nil // swallow: keep the long-lived group alive
+			}
+		}()
+		f()
+		return nil
+	})
+}
+
+// snapshotState returns a consistent (field-wise atomic) copy of the global
+// counters for the status endpoint.
+func snapshotState() State {
+	return State{
+		MainRecvNum:      atomic.LoadInt32(&gState.MainRecvNum),
+		MainSendNum:      atomic.LoadInt32(&gState.MainSendNum),
+		MainRecvSize:     atomic.LoadInt64(&gState.MainRecvSize),
+		MainSendSize:     atomic.LoadInt64(&gState.MainSendSize),
+		RecvNum:          atomic.LoadInt32(&gState.RecvNum),
+		SendNum:          atomic.LoadInt32(&gState.SendNum),
+		RecvSize:         atomic.LoadInt64(&gState.RecvSize),
+		SendSize:         atomic.LoadInt64(&gState.SendSize),
+		RecvCompSaveSize: atomic.LoadInt64(&gState.RecvCompSaveSize),
+		SendCompSaveSize: atomic.LoadInt64(&gState.SendCompSaveSize),
+	}
+}
+
+// snapshotThreadNum returns an atomic copy of the live goroutine counters.
+func snapshotThreadNum() StateThreadNum {
+	return StateThreadNum{
+		RecvThread:          atomic.LoadInt32(&gStateThreadNum.RecvThread),
+		SendThread:          atomic.LoadInt32(&gStateThreadNum.SendThread),
+		InputerSonnyThread:  atomic.LoadInt32(&gStateThreadNum.InputerSonnyThread),
+		OutputerSonnyThread: atomic.LoadInt32(&gStateThreadNum.OutputerSonnyThread),
+	}
+}
+
+func showState(wg *thread.Group) {
 	loggo.Info("showState start ")
 
 	ticker := time.NewTicker(time.Minute)
@@ -945,7 +1006,6 @@ func showState(wg *thread.Group) error {
 		}
 	}
 	loggo.Info("showState end")
-	return nil
 }
 
 func setCongestion(c network.Conn, config *Config) {

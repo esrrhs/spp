@@ -205,13 +205,7 @@ func (h *channelHub) statusLine() string {
 		if i > 0 {
 			s += " | "
 		}
-		st := "active"
-		switch atomic.LoadInt32(&p.state) {
-		case pipeGray:
-			st = "gray"
-		case pipeDead:
-			st = "dead"
-		}
+		st := pipeStateName(atomic.LoadInt32(&p.state))
 		s += p.proto + "=" + st +
 			" thr=" + formatBps(atomic.LoadInt64(&p.thrBps)) +
 			" rtt=" + time.Duration(atomic.LoadInt64(&p.rttNs)).String()

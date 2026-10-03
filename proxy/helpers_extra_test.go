@@ -327,3 +327,43 @@ func TestE2E_HTTPProxy_MalformedRequests(t *testing.T) {
 	defer c4.Close()
 	echoRoundTrip(t, c4, []byte("still-alive-after-garbage"), 5*time.Second)
 }
+
+// Malformed SOCKS5 clients (invalid greeting / truncated handshake) must only
+// lose their own connection; the SOCKS5 listener keeps serving afterwards.
+func TestE2E_Socks5_MalformedHandshakeKeepsListener(t *testing.T) {
+	h := startSocks5Proxy(t, "tcp", testConfig("socks5-malformed-secret"))
+	defer h.Close()
+
+	sendGarbage := func(payload []byte) {
+		t.Helper()
+		c, err := net.DialTimeout("tcp", h.clientAddr, 3*time.Second)
+		if err != nil {
+			t.Fatalf("dial socks5: %v", err)
+		}
+		defer c.Close()
+		_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+		_, _ = c.Write(payload)
+		// Server should close the conn on a bad handshake; drain EOF.
+		_, _ = c.Read(make([]byte, 16))
+	}
+
+	// 1. Invalid version byte where 0x05 is required.
+	sendGarbage([]byte{0x04, 0x01, 0x00})
+	// 2. Truncated greeting (claims one method, sends none).
+	sendGarbage([]byte{0x05, 0x01})
+	// 3. Plain garbage + immediate half-close.
+	c, err := net.DialTimeout("tcp", h.clientAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial socks5 garbage: %v", err)
+	}
+	_ = c.SetDeadline(time.Now().Add(3 * time.Second))
+	_, _ = c.Write([]byte{0xff, 0xff, 0xff})
+	_ = c.(*net.TCPConn).CloseWrite()
+	_, _ = c.Read(make([]byte, 16))
+	_ = c.Close()
+
+	// Listener is still alive: a fully valid SOCKS5 CONNECT + echo works.
+	good := socks5Connect(t, h.clientAddr, h.echoAddr, 5*time.Second)
+	defer good.Close()
+	echoRoundTrip(t, good, []byte("socks5-alive-after-garbage"), 5*time.Second)
+}

@@ -100,8 +100,8 @@ func NewHttpInputer(wg *thread.Group, proto string, addr string, clienttype CLIE
 		listenconn:   listenconn,
 	}
 
-	wg.Go("Inputer listenHttp "+addr, func() error {
-		return input.listenHttp()
+	goSafe(wg, "Inputer listenHttp "+addr, func() {
+		input.listenHttp()
 	})
 
 	loggo.Info("NewHttpInputer ok %s service=%d", addr, serviceIndex)
@@ -109,7 +109,7 @@ func NewHttpInputer(wg *thread.Group, proto string, addr string, clienttype CLIE
 	return input, nil
 }
 
-func (i *Inputer) listenHttp() error {
+func (i *Inputer) listenHttp() {
 	loggo.Info("Inputer start listenHttp %s", i.addr)
 	for !isExit(i.fwg) {
 		conn, err := i.listenconn.Accept()
@@ -132,17 +132,16 @@ func (i *Inputer) listenHttp() error {
 		}
 
 		proxyconn := &ProxyConn{conn: conn}
-		i.fwg.Go("Inputer processHttpConn "+conn.Info(), func() error {
+		goSafe(i.fwg, "Inputer processHttpConn "+conn.Info(), func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
-			return i.processHttpConn(proxyconn)
+			i.processHttpConn(proxyconn)
 		})
 	}
 	loggo.Info("Inputer end listenHttp %s", i.addr)
-	return nil
 }
 
-func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
+func (i *Inputer) processHttpConn(proxyConn *ProxyConn) {
 	loggo.Debug("processHttpConn start %s", proxyConn.conn.Info())
 
 	if proxyConn.conn.Name() != "tcp" {
@@ -150,7 +149,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		proxyConn.closeConn()
 		// Per-connection failure: close only this conn. Returning an error to
 		// the root group would tear down the entire proxy.
-		return nil
+		return
 	}
 
 	br := bufio.NewReader(proxyConn.conn)
@@ -161,7 +160,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		// Must not fail the Inputer group — that would tear down the whole proxy listen.
 		loggo.Debug("processHttpConn ReadString reqLine fail %s %v", proxyConn.conn.Info(), err)
 		proxyConn.closeConn()
-		return nil
+		return
 	}
 
 	reqLineTrimmed := strings.TrimRight(reqLine, "\r\n")
@@ -169,7 +168,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 	if len(parts) < 3 {
 		loggo.Error("processHttpConn invalid reqLine %s: %s", proxyConn.conn.Info(), reqLineTrimmed)
 		proxyConn.closeConn()
-		return nil
+		return
 	}
 
 	method := strings.ToUpper(parts[0])
@@ -187,7 +186,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 			// open internet. Log at debug and close only this conn.
 			loggo.Debug("processHttpConn ReadString header fail %s %v", proxyConn.conn.Info(), err)
 			proxyConn.closeConn()
-			return nil
+			return
 		}
 		trimmed := strings.TrimRight(headerLine, "\r\n")
 		if trimmed == "" {
@@ -218,7 +217,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 			"Content-Length: 0\r\n\r\n"
 		_, _ = proxyConn.conn.Write([]byte(http407))
 		proxyConn.closeConn()
-		return nil
+		return
 	}
 
 	if method == "CONNECT" {
@@ -227,7 +226,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		if _, err := proxyConn.conn.Write([]byte(resp200)); err != nil {
 			loggo.Error("processHttpConn write 200 fail %s %v", proxyConn.conn.Info(), err)
 			proxyConn.closeConn()
-			return nil
+			return
 		}
 
 		if br.Buffered() > 0 {
@@ -235,10 +234,10 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		}
 
 		loggo.Debug("processHttpConn CONNECT ok %s -> %s", proxyConn.conn.Info(), targetAddr)
-		i.fwg.Go("Inputer processProxyConn "+proxyConn.conn.Info(), func() error {
-			return i.processProxyConn(proxyConn, targetAddr)
+		goSafe(i.fwg, "Inputer processProxyConn "+proxyConn.conn.Info(), func() {
+			i.processProxyConn(proxyConn, targetAddr)
 		})
-		return nil
+		return
 	}
 
 	targetAddr := ""
@@ -265,7 +264,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 		} else {
 			loggo.Info("processHttpConn missing host %s: %s", proxyConn.conn.Info(), reqLineTrimmed)
 			proxyConn.closeConn()
-			return nil
+			return
 		}
 	}
 
@@ -283,8 +282,7 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) error {
 	proxyConn.conn = newPrefixedConn(proxyConn.conn, prefixBuf.Bytes(), br)
 
 	loggo.Debug("processHttpConn HTTP ok %s -> %s", proxyConn.conn.Info(), targetAddr)
-	i.fwg.Go("Inputer processProxyConn "+proxyConn.conn.Info(), func() error {
-		return i.processProxyConn(proxyConn, targetAddr)
+	goSafe(i.fwg, "Inputer processProxyConn "+proxyConn.conn.Info(), func() {
+		i.processProxyConn(proxyConn, targetAddr)
 	})
-	return nil
 }

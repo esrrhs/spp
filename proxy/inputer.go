@@ -48,8 +48,8 @@ func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_T
 		listenconn:   listenconn,
 	}
 
-	wg.Go("Inputer listen"+" "+targetAddr, func() error {
-		return input.listen(targetAddr)
+	goSafe(wg, "Inputer listen"+" "+targetAddr, func() {
+		input.listen(targetAddr)
 	})
 
 	loggo.Info("NewInputer ok %s service=%d", addr, serviceIndex)
@@ -79,8 +79,8 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 		listenconn:   listenconn,
 	}
 
-	wg.Go("Inputer listenSocks5"+" "+addr, func() error {
-		return input.listenSocks5()
+	goSafe(wg, "Inputer listenSocks5"+" "+addr, func() {
+		input.listenSocks5()
 	})
 
 	loggo.Info("NewInputer ok %s service=%d", addr, serviceIndex)
@@ -150,7 +150,7 @@ func (i *Inputer) processOpenRspFrame(f *ProxyFrame) {
 	}
 }
 
-func (i *Inputer) listen(targetAddr string) error {
+func (i *Inputer) listen(targetAddr string) {
 
 	loggo.Info("Inputer start listen %s %s", i.addr, targetAddr)
 
@@ -174,17 +174,16 @@ func (i *Inputer) listen(targetAddr string) error {
 		}
 
 		proxyconn := &ProxyConn{conn: conn}
-		i.fwg.Go("Inputer processProxyConn"+" "+targetAddr, func() error {
+		goSafe(i.fwg, "Inputer processProxyConn"+" "+targetAddr, func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
-			return i.processProxyConn(proxyconn, targetAddr)
+			i.processProxyConn(proxyconn, targetAddr)
 		})
 	}
 	loggo.Info("Inputer end listen %s", i.addr)
-	return nil
 }
 
-func (i *Inputer) listenSocks5() error {
+func (i *Inputer) listenSocks5() {
 
 	loggo.Info("Inputer start listenSocks5 %s", i.addr)
 
@@ -208,17 +207,16 @@ func (i *Inputer) listenSocks5() error {
 		}
 
 		proxyconn := &ProxyConn{conn: conn}
-		i.fwg.Go("Inputer processSocks5Conn"+" "+conn.Info(), func() error {
+		goSafe(i.fwg, "Inputer processSocks5Conn"+" "+conn.Info(), func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
-			return i.processSocks5Conn(proxyconn)
+			i.processSocks5Conn(proxyconn)
 		})
 	}
 	loggo.Info("Inputer end listenSocks5 %s", i.addr)
-	return nil
 }
 
-func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
+func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) {
 
 	loggo.Debug("processSocks5Conn start %s", proxyConn.conn.Info())
 
@@ -227,7 +225,7 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 		proxyConn.closeConn()
 		// Runs on the client root group: close just this conn, never bubble
 		// an error up or a single bad accept tears down the whole proxy.
-		return nil
+		return
 	}
 
 	var reqCmd byte
@@ -262,16 +260,16 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 	err := wg.Wait()
 	if err != nil || handshakeErr != nil {
 		proxyConn.closeConn()
-		return nil
+		return
 	}
 
 	if reqCmd == network.Socks5CmdUDPAssociate {
 		loggo.Info("processSocks5Conn UDP ASSOCIATE %s", proxyConn.conn.Info())
-		i.fwg.Go("Inputer socks5UDPAssociate"+" "+proxyConn.conn.Info(), func() error {
+		goSafe(i.fwg, "Inputer socks5UDPAssociate"+" "+proxyConn.conn.Info(), func() {
 			defer proxyConn.closeConn()
-			return i.handleSocks5UDPAssociate(proxyConn, targetAddr)
+			i.handleSocks5UDPAssociate(proxyConn, targetAddr)
 		})
-		return nil
+		return
 	}
 
 	// SOCKS5 CONNECT
@@ -282,19 +280,17 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 	if err != nil {
 		loggo.Error("processSocks5Conn Write %s %s", proxyConn.conn.Info(), err)
 		proxyConn.closeConn()
-		return nil
+		return
 	}
 
 	loggo.Debug("processSocks5Conn ok %s %s", proxyConn.conn.Info(), targetAddr)
 
-	i.fwg.Go("Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() error {
-		return i.processProxyConn(proxyConn, targetAddr)
+	goSafe(i.fwg, "Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() {
+		i.processProxyConn(proxyConn, targetAddr)
 	})
-
-	return nil
 }
 
-func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) error {
+func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 
 	proxyConn.id = common.UniqueId()
 
@@ -304,7 +300,7 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	if loaded {
 		loggo.Error("Inputer processProxyConn LoadOrStore fail %s", proxyConn.id)
 		proxyConn.conn.Close()
-		return nil
+		return
 	}
 	atomic.AddInt32(&i.sonnyNum, 1)
 
@@ -359,8 +355,6 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) erro
 	closeRemoteConn(proxyConn, i.father)
 
 	loggo.Info("Inputer processProxyConn end %s %s %s", proxyConn.id, proxyConn.conn.Info(), targetAddr)
-
-	return nil
 }
 
 func (i *Inputer) hasSonny(id string) bool {

@@ -118,6 +118,7 @@ type ConfigFile struct {
 	MaxConn      *int     `json:"maxconn,omitempty"`
 	KcpFecData   *int     `json:"kcpfecdata,omitempty"`
 	KcpFecParity *int     `json:"kcpfecparity,omitempty"`
+	StatusAddr   string   `json:"statusaddr,omitempty"`
 }
 
 func loadConfigFile(filePath string) (*ConfigFile, error) {
@@ -172,6 +173,7 @@ func main() {
 	maxconn := flag.Int("maxconn", 10240, "max connection")
 	kcpfecdata := flag.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
 	kcpfecparity := flag.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
+	statusAddr := flag.String("statusaddr", "", "HTTP health/status listen address (e.g. 127.0.0.1:6060), empty disables; serves /healthz and /status")
 
 	flag.Parse()
 
@@ -277,6 +279,9 @@ func main() {
 		}
 		if !cliSet["kcpfecparity"] && fileCfg.KcpFecParity != nil {
 			*kcpfecparity = *fileCfg.KcpFecParity
+		}
+		if !cliSet["statusaddr"] && fileCfg.StatusAddr != "" {
+			*statusAddr = fileCfg.StatusAddr
 		}
 	}
 
@@ -463,12 +468,35 @@ func main() {
 		go http.ListenAndServe(":"+strconv.Itoa(*profile), nil)
 	}
 
-	// Wait for OS termination signal to gracefully shut down
+	var statusSrv *proxy.StatusServer
+	if *statusAddr != "" {
+		var collect func() proxy.StatusReport
+		if s != nil {
+			collect = s.SnapshotStatus
+		} else {
+			collect = c.SnapshotStatus
+		}
+		ss, err := proxy.StartStatusServer(*statusAddr, collect)
+		if err != nil {
+			loggo.Error("main status server fail %s", err.Error())
+			if s != nil {
+				s.Close()
+			}
+			if c != nil {
+				c.Close()
+			}
+			return
+		}
+		statusSrv = ss
+	}
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
 	sig := <-sigCh
 	loggo.Info("received signal %v, shutting down...", sig)
 
+	if statusSrv != nil {
+		_ = statusSrv.Close()
+	}
 	if s != nil {
 		s.Close()
 	}

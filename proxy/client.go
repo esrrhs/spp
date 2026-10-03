@@ -138,12 +138,12 @@ func NewClient(config *Config, serverprotos []string, servers []string, name str
 		wg:           wg,
 	}
 
-	wg.Go("Client state"+" "+clienttypestr, func() error {
-		return showState(wg)
+	goSafe(wg, "Client state"+" "+clienttypestr, func() {
+		showState(wg)
 	})
 
-	wg.Go("Client connect", func() error {
-		return c.connect()
+	goSafe(wg, "Client connect", func() {
+		c.connect()
 	})
 
 	return c, nil
@@ -154,7 +154,7 @@ func (c *Client) Close() {
 	c.wg.Wait()
 }
 
-func (c *Client) connect() error {
+func (c *Client) connect() {
 	loggo.Info("connect start protos=%v addrs=%v", c.serverprotos, c.servers)
 
 	checkTicker := time.NewTicker(time.Second)
@@ -164,7 +164,7 @@ func (c *Client) connect() error {
 		select {
 		case <-c.wg.Done():
 			loggo.Info("connect end")
-			return nil
+			return
 		case <-checkTicker.C:
 			for i := range c.serverprotos {
 				if atomic.LoadInt32(&c.pipeLive[i]) != 0 {
@@ -186,16 +186,16 @@ func (c *Client) connect() error {
 					continue
 				}
 				atomic.StoreInt32(&c.pipeLive[idx], 1)
-				c.wg.Go("Client usePipe "+proto+" "+addr, func() error {
+				goSafe(c.wg, "Client usePipe "+proto+" "+addr, func() {
 					defer atomic.StoreInt32(&c.pipeLive[idx], 0)
-					return c.usePipe(idx, proto, addr, targetconn)
+					c.usePipe(idx, proto, addr, targetconn)
 				})
 			}
 		}
 	}
 }
 
-func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) error {
+func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) {
 	loggo.Info("usePipe start %s %s", proto, addr)
 
 	pipe := &mainPipe{
@@ -255,7 +255,6 @@ func (c *Client) usePipe(index int, proto, addr string, conn network.Conn) error
 
 	wg.Wait()
 	loggo.Info("usePipe close %s %s", proto, addr)
-	return nil
 }
 
 func (c *Client) onPipeGone() {
@@ -293,8 +292,8 @@ func (c *Client) ensureSession() *ServerConn {
 	sess.setCodec(defaultFrameCodec(c.config))
 	c.serverconn = sess
 
-	c.wg.Go("Client processSession", func() error {
-		return c.processSession(c.wg, sess)
+	goSafe(c.wg, "Client processSession", func() {
+		c.processSession(c.wg, sess)
 	})
 	return sess
 }
@@ -566,7 +565,7 @@ func (c *Client) probePipe(wg *thread.Group, pipe *mainPipe) error {
 	}
 }
 
-func (c *Client) processSession(wg *thread.Group, sess *ServerConn) error {
+func (c *Client) processSession(wg *thread.Group, sess *ServerConn) {
 	loggo.Info("processSession start")
 	recvq := sess.recvq
 	for !isExit(wg) {
@@ -598,7 +597,6 @@ func (c *Client) processSession(wg *thread.Group, sess *ServerConn) error {
 		}
 	}
 	loggo.Info("processSession end")
-	return nil
 }
 
 func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
