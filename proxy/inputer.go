@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -226,7 +225,9 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) error {
 	if proxyConn.conn.Name() != "tcp" {
 		loggo.Error("processSocks5Conn no tcp %s %s", proxyConn.conn.Info(), proxyConn.conn.Name())
 		proxyConn.closeConn()
-		return errors.New("socks5 not tcp")
+		// Runs on the client root group: close just this conn, never bubble
+		// an error up or a single bad accept tears down the whole proxy.
+		return nil
 	}
 
 	var reqCmd byte
