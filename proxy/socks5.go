@@ -113,26 +113,26 @@ func getSocks5RelayAddr(listenAddr net.Addr, tcpConn network.Conn) string {
 	return net.JoinHostPort(socks5RelayHost(tcpConn), strconv.Itoa(port))
 }
 
-func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget string) error {
+func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget string) {
 	udpAddr, err := net.ResolveUDPAddr("udp", socks5RelayBindAddr(tcpProxyConn.conn))
 	if err != nil {
 		// Runs directly on the client root group: never propagate an error
 		// or a single failed association tears down the whole proxy.
 		loggo.Error("socks5 UDP resolve relay addr: %v", err)
-		return nil
+		return
 	}
 	udpListener, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
 		_ = network.Sock5SendConnectReply(tcpProxyConn.conn, 0x01, socks5ZeroBind(tcpProxyConn.conn))
 		loggo.Error("socks5 UDP listen relay: %v", err)
-		return nil
+		return
 	}
 
 	relayAddr := getSocks5RelayAddr(udpListener.LocalAddr(), tcpProxyConn.conn)
 	if err := network.Sock5SendConnectReply(tcpProxyConn.conn, 0x00, relayAddr); err != nil {
 		udpListener.Close()
 		loggo.Error("socks5 UDP relay reply fail: %v", err)
-		return nil
+		return
 	}
 
 	loggo.Info("socks5 UDP ASSOCIATE listening on %s (relay %s) for tcp %s",
@@ -311,5 +311,4 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 
 	udpGroup.Stop()
 	udpGroup.Wait()
-	return nil
 }

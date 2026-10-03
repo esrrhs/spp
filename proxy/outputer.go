@@ -227,14 +227,14 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	proxyconn.sendch = sendch
 	proxyconn.recvch = recvch
 
-	o.fwg.Go("Outputer processProxyConn"+" "+targetAddr, func() error {
+	goSafe(o.fwg, "Outputer processProxyConn"+" "+targetAddr, func() {
 		atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, 1)
 		defer atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, -1)
-		return o.processProxyConn(proxyconn, targetAddr, dialProto)
+		o.processProxyConn(proxyconn, targetAddr, dialProto)
 	})
 }
 
-func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dialProto string) error {
+func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dialProto string) {
 
 	loggo.Info("Outputer processProxyConn start %s %s", proxyConn.id, targetAddr)
 
@@ -246,7 +246,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dia
 		if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
 			atomic.AddInt32(&o.sonnyNum, -1)
 		}
-		return nil
+		return
 	}
 
 	loggo.Info("Outputer processProxyConn open ok %s %s", proxyConn.id, proxyConn.conn.Info())
@@ -287,8 +287,6 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dia
 	closeRemoteConn(proxyConn, o.father)
 
 	loggo.Info("Outputer processProxyConn end %s %s", proxyConn.id, proxyConn.conn.Info())
-
-	return nil
 }
 
 func (o *Outputer) sonnySize() int {

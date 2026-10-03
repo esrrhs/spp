@@ -277,6 +277,7 @@ Then:
 | `maxconn` | integer | Maximum sub-connections |
 | `kcpfecdata` | integer | KCP FEC data shards (e.g. `10`); `0` disables FEC. Must match on both ends |
 | `kcpfecparity` | integer | KCP FEC parity shards (e.g. `3`); `0` disables FEC. `kcpfecdata` + `kcpfecparity` must not exceed 256 |
+| `statusaddr` | string | HTTP health/status listen address (e.g. `127.0.0.1:6060`); omit/empty disables |
 
 ### Server Example
 
@@ -368,8 +369,33 @@ Usage of spp:
         Enable pprof profiling on specified port
   -ping
         Log periodic ping latency
+  -statusaddr
+        HTTP health/status listen address (e.g. 127.0.0.1:6060); empty
+        disables. Serves GET /healthz (liveness) and GET /status (JSON:
+        pipe state/RTT/throughput, services, sonny counts, byte counters).
+        Bind to loopback unless external access is secured separately.
   -version, -v
         Print version and build details
+```
+
+`/status` example:
+
+```bash
+$ curl -s 127.0.0.1:6060/status | python3 -m json.tool
+{
+    "role": "server",
+    "version": "0.14.1",
+    "uptimeSec": 128,
+    "goroutines": 37,
+    "established": false,
+    "clients": 1,
+    "sonny": 2,
+    "pipes": [
+        {"proto": "tcp", "addr": "127.0.0.1:9000<--tcp-->...", "state": "active", "rttMs": 3, "thrBps": 1048576}
+    ],
+    "services": [{"index": 0, "kind": "output", "proto": "tcp", "sonny": 2}],
+    "counters": {"MainRecvSize": 512000, "SendCompSaveSize": 81920}
+}
 ```
 
 ---

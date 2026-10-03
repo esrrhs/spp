@@ -114,13 +114,13 @@ func NewServer(config *Config, proto []string, listenaddrs []string) (*Server, e
 
 	for i := range proto {
 		index := i
-		wg.Go("Server listen"+" "+listenaddrs[i], func() error {
-			return s.listen(index)
+		goSafe(wg, "Server listen"+" "+listenaddrs[i], func() {
+			s.listen(index)
 		})
 	}
 
-	wg.Go("Client state", func() error {
-		return showState(wg)
+	goSafe(wg, "Client state", func() {
+		showState(wg)
 	})
 
 	return s, nil
@@ -131,7 +131,7 @@ func (s *Server) Close() {
 	s.wg.Wait()
 }
 
-func (s *Server) listen(index int) error {
+func (s *Server) listen(index int) {
 	loggo.Info("listen start %d %s", index, s.listenaddrs[index])
 	for !isExit(s.wg) {
 		conn, err := s.listenConns[index].Accept()
@@ -149,12 +149,11 @@ func (s *Server) listen(index int) error {
 			proto:     conn.Name(),
 			addr:      conn.Info(),
 		}
-		s.wg.Go("Server servePipe"+" "+conn.Info(), func() error {
-			return s.servePipe(pipe)
+		goSafe(s.wg, "Server servePipe"+" "+conn.Info(), func() {
+			s.servePipe(pipe)
 		})
 	}
 	loggo.Info("listen end %d %s", index, s.listenaddrs[index])
-	return nil
 }
 
 func (s *Server) clientSize() int {
@@ -165,7 +164,7 @@ func (s *Server) clientSize() int {
 	return int(n)
 }
 
-func (s *Server) servePipe(pipe *mainPipe) error {
+func (s *Server) servePipe(pipe *mainPipe) {
 	loggo.Info("servePipe accept %s", pipe.conn.Info())
 
 	sendq := newPrioQueue(s.config.MainBuffer)
@@ -221,15 +220,17 @@ func (s *Server) servePipe(pipe *mainPipe) error {
 	})
 
 	if err := s.sendAuthChallenge(pipe); err != nil {
+		// Runs on the server root group: stop/clean up just this pipe's
+		// group and return; never propagate the error or the whole server
+		// (and every client session) exits.
 		loggo.Error("servePipe sendAuthChallenge fail %s %s", pipe.conn.Info(), err.Error())
 		wg.Stop()
 		wg.Wait()
-		return err
+		return
 	}
 
 	wg.Wait()
 	loggo.Info("servePipe close %s", pipe.conn.Info())
-	return nil
 }
 
 func (s *Server) onPipeGone(sess *ClientConn) {
@@ -404,8 +405,8 @@ func (s *Server) processLogin(f *ProxyFrame, pipe *mainPipe, sessionRef *atomic.
 	pipe.setEstablished(true)
 	sess.setEstablished(true)
 
-	s.wg.Go("Server processSession "+strconv.FormatUint(sess.clientID, 10), func() error {
-		return s.processSession(s.wg, sess)
+	goSafe(s.wg, "Server processSession "+strconv.FormatUint(sess.clientID, 10), func() {
+		s.processSession(s.wg, sess)
 	})
 
 	rf.LoginRspFrame.Ret = true
@@ -465,7 +466,7 @@ func (s *Server) processChannelJoin(f *ProxyFrame, pipe *mainPipe, sessionRef *a
 	loggo.Info("processChannelJoin ok %s session=%d", pipe.conn.Info(), sess.clientID)
 }
 
-func (s *Server) processSession(wg *thread.Group, sess *ClientConn) error {
+func (s *Server) processSession(wg *thread.Group, sess *ClientConn) {
 	loggo.Info("processSession start %d", sess.clientID)
 	recvq := sess.recvq
 	for !isExit(wg) {
@@ -492,7 +493,6 @@ func (s *Server) processSession(wg *thread.Group, sess *ClientConn) error {
 		}
 	}
 	loggo.Info("processSession end %d", sess.clientID)
-	return nil
 }
 
 func loginServicesOf(f *LoginFrame) []*LoginService {

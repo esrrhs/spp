@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -74,6 +75,24 @@ func TestRepeatableFlags_StringAndSet(t *testing.T) {
 	_ = tt.Set("x")
 	if got := tt.String(); got != "x" {
 		t.Fatalf("toFlags String=%q", got)
+	}
+}
+
+func TestConfigFile_StatusAddrRoundTrip(t *testing.T) {
+	cfg := ConfigFile{Type: "server", StatusAddr: "127.0.0.1:6060"}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"statusaddr":"127.0.0.1:6060"`) {
+		t.Fatalf("statusaddr missing from json: %s", raw)
+	}
+	var back ConfigFile
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.StatusAddr != "127.0.0.1:6060" {
+		t.Fatalf("statusaddr roundtrip=%q", back.StatusAddr)
 	}
 }
 
