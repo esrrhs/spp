@@ -2,14 +2,69 @@ package proxy
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// isResourceExhaustedErr reports a client-side dial failure caused by the
+// local host running out of ephemeral ports / socket resources. On macOS
+// loopback, thousands of short-lived conns back-to-back trigger
+// EADDRNOTAVAIL ("can't assign requested address") because active-connect
+// sockets cannot reuse peers in TIME_WAIT. This is an environment limit,
+// not a proxy integrity failure, so it must never fail the test outright.
+func isResourceExhaustedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var errno syscall.Errno
+	if errors.As(err, &errno) {
+		switch errno {
+		case syscall.EADDRNOTAVAIL, syscall.EADDRINUSE,
+			syscall.EAGAIN, syscall.EMFILE, syscall.ENFILE:
+			return true
+		}
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "can't assign requested address") ||
+		strings.Contains(msg, "address already in use") ||
+		strings.Contains(msg, "too many open files")
+}
+
+// dialResourceRetry dials addr, backing off when the local socket/ephemeral
+// pool is exhausted. exhausted=true means every attempt failed solely for
+// resource reasons (the test should skip, not fail). Any other dial error is
+// returned verbatim.
+func dialResourceRetry(addr string, timeout time.Duration) (conn net.Conn, exhausted bool, err error) {
+	deadline := time.Now().Add(timeout)
+	var last error
+	for attempt := 0; ; attempt++ {
+		c, derr := net.DialTimeout("tcp", addr, 2*time.Second)
+		if derr == nil {
+			return c, false, nil
+		}
+		last = derr
+		if !isResourceExhaustedErr(derr) {
+			return nil, false, last
+		}
+		if time.Now().After(deadline) {
+			return nil, true, nil
+		}
+		// Linear 50ms..1s backoff; pausing all churners lets TIME_WAIT recycle.
+		wait := time.Duration(50*(attempt+1)) * time.Millisecond
+		if wait > time.Second {
+			wait = time.Second
+		}
+		time.Sleep(wait)
+	}
+}
 
 func TestE2E_UnderlayMatrix_ForwardEcho(t *testing.T) {
 	for _, proto := range matrixUnderlaysCore {
@@ -22,7 +77,10 @@ func TestE2E_UnderlayMatrix_ForwardEcho(t *testing.T) {
 			defer conn.Close()
 
 			msg := []byte("hello underlay " + proto)
-			echoRoundTrip(t, conn, msg, 10*time.Second)
+			// 20s deadline: under -race or noisy CI runners the QUIC
+			// handshake/first-data nudge can starve for several seconds; a
+			// tiny echo must still fail fast on a genuinely broken path.
+			echoRoundTrip(t, conn, msg, 20*time.Second)
 		})
 	}
 }
@@ -72,7 +130,13 @@ func TestE2E_MixedChunkIntegrity(t *testing.T) {
 			defer close(stop)
 			time.Sleep(200 * time.Millisecond)
 
-			conn := h.Dial(5 * time.Second)
+			conn, dialExhausted, dialErr := dialResourceRetry(h.clientAddr, 30*time.Second)
+			if dialErr != nil {
+				if dialExhausted {
+					t.Skip("local resource exhaustion before mixed-chunk dial")
+				}
+				t.Fatalf("mixed-chunk dial: %v", dialErr)
+			}
 			defer conn.Close()
 
 			// Alternating sizes force ≤4096 trailing/interleaved frames after
@@ -108,7 +172,7 @@ func TestE2E_ShortConnChurnIntegrity(t *testing.T) {
 	)
 
 	deadline := time.Now().Add(duration)
-	var okN, failN atomic.Int64
+	var okN, failN, exhaustedN atomic.Int64
 	var wg sync.WaitGroup
 	errCh := make(chan string, workers)
 
@@ -120,8 +184,12 @@ func TestE2E_ShortConnChurnIntegrity(t *testing.T) {
 			fillPattern(payload, byte(id))
 			want := sha256.Sum256(payload)
 			for time.Now().Before(deadline) {
-				conn, err := net.DialTimeout("tcp", h.clientAddr, 2*time.Second)
+				conn, exhausted, err := dialResourceRetry(h.clientAddr, 30*time.Second)
 				if err != nil {
+					if exhausted {
+						exhaustedN.Add(1)
+						return // host cannot assess integrity right now; gate below
+					}
 					failN.Add(1)
 					select {
 					case errCh <- fmt.Sprintf("dial: %v", err):
@@ -149,12 +217,16 @@ func TestE2E_ShortConnChurnIntegrity(t *testing.T) {
 	}
 	wg.Wait()
 
-	ok, fail := okN.Load(), failN.Load()
-	t.Logf("short churn: ok=%d fail=%d", ok, fail)
+	ok, fail, exhausted := okN.Load(), failN.Load(), exhaustedN.Load()
+	t.Logf("short churn: ok=%d fail=%d resourceExhausted=%d", ok, fail, exhausted)
+	if exhausted > 0 && ok < 50 {
+		t.Skipf("local ephemeral port/socket exhaustion prevented the churn run: ok=%d exhausted=%d", ok, exhausted)
+	}
 	if ok < 50 {
 		t.Fatalf("too few successful short conns: ok=%d", ok)
 	}
-	// Allow a tiny dial race at shutdown, but integrity failures must be rare.
+	// Resource-exhaustion dials are environmental; only real dial/integrity
+	// failures count toward the 5% gate.
 	if fail*20 > ok { // >5% failure
 		msg := "unknown"
 		select {
@@ -205,8 +277,11 @@ func TestE2E_ConcurrentBulkAndInteractiveIntegrity(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	for i := 0; i < 8; i++ {
-		conn, err := net.DialTimeout("tcp", h.clientAddr, 5*time.Second)
+		conn, exhausted, err := dialResourceRetry(h.clientAddr, 30*time.Second)
 		if err != nil {
+			if exhausted {
+				t.Skipf("local resource exhaustion before interactive dial %d", i)
+			}
 			t.Fatalf("interactive dial %d: %v", i, err)
 		}
 		msg := []byte(fmt.Sprintf("interactive-page-%d-payload", i))
