@@ -41,8 +41,6 @@ type Config struct {
 	MaxSonny                  int           // 最大连接数目
 	MainWriteChannelTimeoutMs int           // 主通道转发消息超时
 	Congestion                string        // 拥塞算法
-	ProbeInter                int           // 多通道测速间隔（秒）
-	ProbeSize                 int           // 测速 payload 字节数
 	KcpFecDataShards          int           // KCP FEC 数据分片数，0 关闭 FEC；启用时客户端与服务端必须配置一致
 	KcpFecParityShards        int           // KCP FEC 校验分片数，0 关闭 FEC（如 10 数据 +3 校验，约 30% 冗余）
 }
@@ -70,8 +68,6 @@ func DefaultConfig() *Config {
 		MaxSonny:                  10240,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
-		ProbeInter:                5,
-		ProbeSize:                 64 * 1024,
 	}
 }
 
@@ -110,15 +106,10 @@ func isWeakSecret(s string) bool {
 	}
 }
 
-// frameRouter selects an underlay pipe for outbound session frames.
-type frameRouter interface {
-	routeFrame(f *ProxyFrame, interactive bool)
-}
-
 type ProxyConn struct {
 	conn        network.Conn
 	established int32 // atomic bool
-	// Main channel (client/server): single priority queues matching one pipe.
+	// Main channel (client/server): single priority queues matching one conn.
 	sendq *prioQueue
 	recvq *prioQueue
 	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
@@ -127,8 +118,10 @@ type ProxyConn struct {
 	actived           int32
 	pinged            int32
 	sentBytes         int64
+	rttNs             int64 // last PONG round-trip time (atomic, status page)
 	id                string
 	needclose         int32 // atomic bool
+	authChallenge     []byte
 	compressType      int32 // COMPRESS_TYPE
 	encryptType       int32 // ENCRYPT_TYPE
 	compressThreshold int32
@@ -139,8 +132,6 @@ type ProxyConn struct {
 	mu                sync.RWMutex
 	isClosed          bool
 	closeOnce         sync.Once
-	// If set, SendFrame/SendData delegate to multi-pipe selection.
-	router frameRouter
 }
 
 func (p *ProxyConn) Info() string {
@@ -176,6 +167,16 @@ func (p *ProxyConn) setNeedClose() {
 
 func (p *ProxyConn) isNeedClose() bool {
 	return atomic.LoadInt32(&p.needclose) != 0
+}
+
+func (p *ProxyConn) noteRTT(d time.Duration) {
+	if d > 0 {
+		atomic.StoreInt64(&p.rttNs, int64(d))
+	}
+}
+
+func (p *ProxyConn) rtt() time.Duration {
+	return time.Duration(atomic.LoadInt64(&p.rttNs))
 }
 
 // dialWithTimeout dials addr and aborts if it takes longer than timeoutSec.
@@ -268,13 +269,9 @@ func (p *ProxyConn) pickRecvCh() *msgChannel {
 
 // SendFrame enqueues a frame on the main priority queue (control jumps ahead).
 func (p *ProxyConn) SendFrame(f *ProxyFrame) {
-	if p.router != nil {
-		p.router.routeFrame(f, false)
-		return
-	}
 	if q := p.pickSendQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -287,10 +284,6 @@ func (p *ProxyConn) SendFrame(f *ProxyFrame) {
 
 // SendData enqueues DATA: interactive can jump ahead of bulk on the same queue.
 func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
-	if p.router != nil {
-		p.router.routeFrame(f, isInteractive)
-		return
-	}
 	if q := p.pickSendQ(); q != nil {
 		prio := prioBulk
 		if isInteractive {
@@ -311,7 +304,7 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG || f.Type == FRAME_TYPE_SPEEDTEST {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -382,18 +375,6 @@ func checkProxyFame(f *ProxyFrame) error {
 	case FRAME_TYPE_AUTH_CHALLENGE:
 		if f.AuthChallengeFrame == nil {
 			return errors.New("AuthChallengeFrame nil")
-		}
-	case FRAME_TYPE_CHANNEL_JOIN:
-		if f.ChannelJoinFrame == nil {
-			return errors.New("ChannelJoinFrame nil")
-		}
-	case FRAME_TYPE_CHANNEL_JOIN_RSP:
-		if f.ChannelJoinRspFrame == nil {
-			return errors.New("ChannelJoinRspFrame nil")
-		}
-	case FRAME_TYPE_SPEEDTEST:
-		if f.SpeedTestFrame == nil {
-			return errors.New("SpeedTestFrame nil")
 		}
 	default:
 		return errors.New("Type error")

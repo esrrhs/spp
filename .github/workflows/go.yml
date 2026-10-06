@@ -51,7 +51,7 @@ jobs:
         run: go test -v -race -timeout 15m -skip 'TestE2E_FullMatrix' ./...
 
       - name: Stability Gate (no race)
-        run: go test -v -timeout 10m -count=1 ./proxy/ -run 'TestE2E_(UnderlayMatrix|MixedChunk|ShortConnChurn|ConcurrentBulk|MultiPath_Failover|Lifecycle_|Resilience_)'
+        run: go test -v -timeout 10m -count=1 ./proxy/ -run 'TestE2E_(UnderlayMatrix|MixedChunk|ShortConnChurn|ConcurrentBulk|Lifecycle_|Resilience_)'
 
   e2e-netem:
     name: E2E netem loss+reorder

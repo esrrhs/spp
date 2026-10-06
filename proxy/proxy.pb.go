@@ -508,7 +508,7 @@ type LoginRspFrame struct {
 	// Agreed session codecs (echoed by server on success).
 	CompressType COMPRESS_TYPE `protobuf:"varint,3,opt,name=compress_type,json=compressType,proto3,enum=COMPRESS_TYPE" json:"compress_type,omitempty"`
 	EncryptType  ENCRYPT_TYPE  `protobuf:"varint,4,opt,name=encrypt_type,json=encryptType,proto3,enum=ENCRYPT_TYPE" json:"encrypt_type,omitempty"`
-	// Server-local session id; extra underlay pipes CHANNEL_JOIN with this id.
+	// Server-local session id (informational).
 	SessionId     uint64 `protobuf:"varint,5,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -623,7 +623,7 @@ func (x *AuthChallengeFrame) GetChallenge() []byte {
 	return nil
 }
 
-// Attach another underlay pipe to an existing session (same logical client).
+// Deprecated: multi-path CHANNEL_JOIN was removed; one client uses one conn.
 type ChannelJoinFrame struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SessionId     uint64                 `protobuf:"varint,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`

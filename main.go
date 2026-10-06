@@ -139,20 +139,20 @@ func main() {
 	showVersion := flag.Bool("version", false, "print version information")
 	showVersionShort := flag.Bool("v", false, "print version information")
 	configPath := flag.String("config", "", "path to json configuration file")
-	genconfig := flag.Bool("genconfig", false, "generate multi-path server + all mode client configs and exit")
+	genconfig := flag.Bool("genconfig", false, "generate a multi-listener server config plus one client config per mode and exit")
 	outdir := flag.String("outdir", ".", "output directory for -genconfig")
 	force := flag.Bool("force", false, "overwrite existing files when using -genconfig")
 
 	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
 	var protos protoFlags
-	flag.Var(&protos, "proto", "main proto type: "+fmt.Sprintf("%v", network.SupportReliableProtos()))
+	flag.Var(&protos, "proto", "main proto type (server may repeat; client takes exactly one): "+fmt.Sprintf("%v", network.SupportReliableProtos()))
 	var proxyproto proxyprotoFlags
 	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", network.SupportProtos()))
 	var listenaddrs listenAddrs
-	flag.Var(&listenaddrs, "listen", "server listen addr")
+	flag.Var(&listenaddrs, "listen", "server listen addr (repeat with -proto for multiple listeners)")
 	name := flag.String("name", "", "optional client tag for logs; empty is fine")
 	var servers serverAddrs
-	flag.Var(&servers, "server", "server addr (repeat with -proto for multi-path)")
+	flag.Var(&servers, "server", "server addr (client takes exactly one)")
 	var fromaddr fromFlags
 	flag.Var(&fromaddr, "fromaddr", "from addr")
 	var toaddr toFlags
@@ -371,14 +371,14 @@ func main() {
 			return
 		}
 	} else {
-		if len(servers) == 0 {
-			fmt.Println("client needs at least one [server]")
+		if len(protos) != 1 {
+			fmt.Println("client takes exactly one [proto]; multi-path is not supported (run multiple clients instead)")
 			fmt.Println()
 			flag.Usage()
 			return
 		}
-		if len(servers) != 1 && len(servers) != len(protos) {
-			fmt.Println("[proto] [server] len must be equal (or single -server for all)")
+		if len(servers) != 1 {
+			fmt.Println("client takes exactly one [server]")
 			fmt.Println()
 			flag.Usage()
 			return
@@ -456,7 +456,7 @@ func main() {
 		clienttypestr := strings.Replace(*t, "_client", "", -1)
 		clienttypestr = strings.ToUpper(clienttypestr)
 		var err error
-		c, err = proxy.NewClient(config, protos, servers, *name, clienttypestr, proxyproto, fromaddr, toaddr)
+		c, err = proxy.NewClient(config, protos[0], servers[0], *name, clienttypestr, proxyproto, fromaddr, toaddr)
 		if err != nil {
 			loggo.Error("main NewClient fail %s", err.Error())
 			return

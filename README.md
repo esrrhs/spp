@@ -26,8 +26,7 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   * HTTP/HTTPS Forward Proxy (supports CONNECT tunneling and standard HTTP, with optional Basic auth)
   * HTTP/HTTPS Reverse Proxy (supports CONNECT tunneling and standard HTTP, with optional Basic auth)
   * Shadowsocks SIP003 Plugin support ([spp-shadowsocks-plugin](https://github.com/esrrhs/spp-shadowsocks-plugin))
-* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing one logical session to the server.
-* **Multi-Path Underlay**: Client can open multiple main pipes (e.g. `-proto tcp -server host:8888 -proto rudp -server host:8889`). Traffic prefers the highest-throughput path; unhealthy pipes are greyed out, probed, and re-enabled when they recover.
+* **Protocol Multiplexing & Conversion**: Proxy traffic from one protocol (e.g. TCP) over another internal transit protocol (e.g. QUIC, KCP, RUDP, or RICMP). Multiple `-fromaddr`/`-proxyproto` pairs each get an Inputer↔Outputer pair, all sharing the one client↔server connection.
 * **Security**:
   * Whole-frame AEAD by default: ChaCha20-Poly1305 (or AES-GCM)
   * Login via HMAC-SHA256 challenge-response (`-key`); no plaintext password on the wire
@@ -83,23 +82,9 @@ Both sides must use the **same** `-key` (auth) and `-encrypt` (wire crypto). Cho
 Optional: `-name` is only a log tag (not used for auth).  
 Encryption off: omit `-encrypt` or set it empty. Auth (`-key`) is always required.
 
-* **Multi-path** (TCP + RUDP underlays; traffic prefers the faster path):
-  ```bash
-  ./spp -type server \
-    -proto tcp -listen :8888 \
-    -proto rudp -listen :8889 \
-    -key 'your-auth-key' -encrypt 'your-encrypt-key'
-
-  ./spp -type proxy_client \
-    -proto tcp -server www.server.com:8888 \
-    -proto rudp -server www.server.com:8889 \
-    -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
-    -key 'your-auth-key' -encrypt 'your-encrypt-key'
-  ```
-
 ### 3. Using Configuration Files
 
-One-shot generate a multi-path server config plus one client config per mode (forward / reverse / socks5 / reverse socks5 / http / reverse http), with shared random keys:
+One-shot generate a multi-listener server config plus one client config per mode (forward / reverse / socks5 / reverse socks5 / http / reverse http), with shared random keys:
 
 ```bash
 ./spp -genconfig
@@ -107,7 +92,7 @@ One-shot generate a multi-path server config plus one client config per mode (fo
 ```
 
 Files written:
-- `config_server.json` — listens **all** main channels (tcp/rudp/ricmp/kcp/quic/rhttp)
+- `config_server.json` — listens on **all** main channels (tcp/rudp/ricmp/kcp/quic/rhttp)
 - `config_proxy_client.json` — forward proxy
 - `config_reverse_proxy_client.json` — reverse proxy
 - `config_socks5_client.json` — SOCKS5
@@ -115,7 +100,7 @@ Files written:
 - `config_http_client.json` — HTTP/HTTPS proxy
 - `config_reverse_http_client.json` — reverse HTTP/HTTPS proxy
 
-Each client also dials **all** main channels. Then start the pair you need:
+Each client uses exactly one underlay (generated configs use `tcp`/`127.0.0.1:8888`; edit to another protocol/port as needed). Then start the pair you need:
 
 ```bash
 ./spp -config config_server.json

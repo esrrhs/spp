@@ -49,24 +49,24 @@ Start a basic TCP server listening on port `8888`:
 ./spp -type server -proto tcp -listen :8888
 ```
 
-You can listen on multiple ports with different protocols simultaneously:
+You can listen on multiple ports with different protocols simultaneously; each
+accepted connection is an independent client session:
 
 ```bash
 ./spp -type server -proto tcp -listen :8888 -proto rudp -listen :9999 -proto ricmp -listen 0.0.0.0
 ```
 
-Client can attach **all** of those underlays into one logical session. Traffic is sent on the highest-throughput active path; unhealthy paths are greyed out, probed with `SPEEDTEST`, and re-enabled when they recover:
+The client picks exactly one of those underlays for its single connection:
 
 ```bash
 ./spp -type proxy_client \
-  -proto tcp -server www.server.com:8888 \
   -proto rudp -server www.server.com:9999 \
-  -proto ricmp -server www.server.com \
   -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
   -key 'your-auth-key' -encrypt 'your-encrypt-key'
 ```
 
-A single `-server` may be repeated for every `-proto` when the address is the same.
+The client takes exactly one `-proto` and one `-server`; redundancy across paths
+can be built one layer up (e.g. run multiple spp instances).
 
 ### Client
 
@@ -241,7 +241,9 @@ Writes these files (shared random auth/encrypt keys):
 | `config_http_client.json` | HTTP/HTTPS proxy on `:8081` |
 | `config_reverse_http_client.json` | Reverse HTTP/HTTPS proxy on `:8081` |
 
-Client configs dial the same full set of underlay addresses. Defaults: AEAD `chacha20`, compression `zstd` / threshold `128`.
+Every client config uses the single `tcp` underlay (`127.0.0.1:8888`); change
+`proto`/`server` to use another protocol. Defaults: AEAD `chacha20`, compression
+`zstd` / threshold `128`.
 
 ```bash
 ./spp -genconfig -outdir ./conf    # output directory
@@ -260,10 +262,10 @@ Then:
 | Field | Type | Description |
 | :--- | :--- | :--- |
 | `type` | string | `server`, `proxy_client`, `reverse_proxy_client`, `socks5_client`, `reverse_socks5_client`, `http_client`, `reverse_http_client` |
-| `proto` | array of string | Internal transit protocols (e.g. `["tcp"]`, `["kcp"]`, `["quic"]`) |
+| `proto` | array of string | Transit protocols. Server may list several (paired with `listen`); client takes exactly one (e.g. `["tcp"]`, `["kcp"]`, `["quic"]`) |
 | `proxyproto` | array of string | Proxy protocols (e.g. `["tcp"]`, `["udp"]`) |
-| `listen` | array of string | Server listening addresses (e.g. `[":8888"]`) |
-| `server` | string | Remote server address (e.g. `127.0.0.1:8888`) |
+| `listen` | array of string | Server listening addresses, paired 1:1 with `proto` (e.g. `[":8888"]`) |
+| `server` | string | Client: the single remote server address (e.g. `127.0.0.1:8888`) |
 | `name` | string | Client identifier |
 | `fromaddr` | array of string | Source addresses to bind / listen |
 | `toaddr` | array of string | Destination target addresses |
@@ -336,13 +338,14 @@ Usage of spp:
   -config string
         Path to json configuration file
   -proto value
-        Main transit protocol: [tcp udp rudp ricmp rhttp kcp quic]
+        Transit protocol: [tcp udp rudp ricmp rhttp kcp quic]
+        (server may repeat with -listen; client takes exactly one)
   -proxyproto value
         Proxy protocol: [tcp udp]
   -listen value
-        Server listen address (e.g. :8888)
+        Server listen address, paired with -proto (e.g. :8888)
   -server string
-        Target server address (e.g. 1.2.3.4:8888)
+        Client: single target server address (e.g. 1.2.3.4:8888)
   -fromaddr value
         Source address
   -toaddr value
@@ -372,7 +375,7 @@ Usage of spp:
   -statusaddr
         HTTP health/status listen address (e.g. 127.0.0.1:6060); empty
         disables. Serves GET /healthz (liveness) and GET /status (JSON:
-        pipe state/RTT/throughput, services, sonny counts, byte counters).
+        underlay proto/RTT, services, sonny counts, byte counters).
         Bind to loopback unless external access is secured separately.
   -version, -v
         Print version and build details
@@ -391,7 +394,7 @@ $ curl -s 127.0.0.1:6060/status | python3 -m json.tool
     "clients": 1,
     "sonny": 2,
     "pipes": [
-        {"proto": "tcp", "addr": "127.0.0.1:9000<--tcp-->...", "state": "active", "rttMs": 3, "thrBps": 1048576}
+        {"proto": "tcp", "addr": "127.0.0.1:9000<--tcp-->...", "rttMs": 3}
     ],
     "services": [{"index": 0, "kind": "output", "proto": "tcp", "sonny": 2}],
     "counters": {"MainRecvSize": 512000, "SendCompSaveSize": 81920}
