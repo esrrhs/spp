@@ -12,10 +12,11 @@ import (
 	"github.com/esrrhs/gohome/thread"
 )
 
-// ClientConn is the logical per-client session on the server. Multiple underlay
-// pipes (tcp/rudp/ricmp/…) attach to one session via LOGIN + CHANNEL_JOIN.
+// ClientConn is the per-client session on the server. It IS the one accepted
+// underlay connection: one client login maps to one conn and one ClientConn.
 type ClientConn struct {
 	ProxyConn
+	bizq *prioQueue // business frames (DATA/OPEN/OPENRSP/CLOSE)
 
 	clienttype CLIENT_TYPE
 	name       string // optional client tag; not unique, not used for auth
@@ -24,7 +25,6 @@ type ClientConn struct {
 	inputs  []*Inputer
 	outputs []*Outputer
 	svcMu   sync.Mutex // guards inputs/outputs vs process* readers
-	hub     *channelHub
 }
 
 func (c *ClientConn) closeServices() {
@@ -58,6 +58,15 @@ func (c *ClientConn) appendOutput(out *Outputer) {
 	c.svcMu.Lock()
 	c.outputs = append(c.outputs, out)
 	c.svcMu.Unlock()
+}
+
+// deliverBusiness pushes a wire frame into the business queue.
+func (c *ClientConn) deliverBusiness(f *ProxyFrame) {
+	prio := prioControl
+	if f.Type == FRAME_TYPE_DATA {
+		prio = prioBulk
+	}
+	c.bizq.Push(f, prio)
 }
 
 type Server struct {
@@ -144,16 +153,24 @@ func (s *Server) listen(index int) {
 			continue
 		}
 
-		pipe := &mainPipe{
-			ProxyConn: ProxyConn{conn: conn},
-			proto:     conn.Name(),
-			addr:      conn.Info(),
-		}
-		goSafe(s.wg, "Server servePipe"+" "+conn.Info(), func() {
-			s.servePipe(pipe)
+		sess := s.newClientConn(conn)
+		goSafe(s.wg, "Server serveConn"+" "+conn.Info(), func() {
+			s.serveConn(sess)
 		})
 	}
 	loggo.Info("listen end %d %s", index, s.listenaddrs[index])
+}
+
+// newClientConn wires a fresh accepted conn into an un-logged-in ClientConn.
+func (s *Server) newClientConn(conn network.Conn) *ClientConn {
+	sess := &ClientConn{
+		ProxyConn: ProxyConn{conn: conn},
+		bizq:      newPrioQueue(s.config.MainBuffer),
+	}
+	sess.sendq = newPrioQueue(s.config.MainBuffer)
+	sess.recvq = newPrioQueue(s.config.MainBuffer)
+	sess.setCodec(defaultFrameCodec(s.config))
+	return sess
 }
 
 func (s *Server) clientSize() int {
@@ -164,111 +181,89 @@ func (s *Server) clientSize() int {
 	return int(n)
 }
 
-func (s *Server) servePipe(pipe *mainPipe) {
-	loggo.Info("servePipe accept %s", pipe.conn.Info())
+func (s *Server) serveConn(sess *ClientConn) {
+	loggo.Info("serveConn accept %s", sess.conn.Info())
 
-	sendq := newPrioQueue(s.config.MainBuffer)
-	recvq := newPrioQueue(s.config.MainBuffer)
-	pipe.sendq = sendq
-	pipe.recvq = recvq
-	pipe.setCodec(defaultFrameCodec(s.config))
-
-	var sessionRef atomic.Pointer[ClientConn]
-
-	wg := thread.NewGroup("Server servePipe"+" "+pipe.conn.Info(), s.wg, func() {
-		loggo.Info("pipe group exit %s", pipe.conn.Info())
-		if pipe.hub != nil {
-			pipe.hub.remove(pipe)
+	wg := thread.NewGroup("Server serveConn"+" "+sess.conn.Info(), s.wg, func() {
+		loggo.Info("conn group exit %s", sess.conn.Info())
+		// clientID 0 means login never completed: nothing is in the map.
+		if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
+			atomic.AddInt32(&s.clientNum, -1)
+			sess.closeServices()
 		}
-		pipe.conn.Close()
-		pipe.CloseChannels()
-		if sess := sessionRef.Load(); sess != nil {
-			s.onPipeGone(sess)
-		}
+		sess.setEstablished(false)
+		sess.closeConn()
+		sess.bizq.Close()
+		sess.CloseChannels()
 	})
 
 	var pingflag int32
 	var pongflag int32
 	var pongtime int64
 
-	wg.Go("Server recvFrom"+" "+pipe.conn.Info(), func() error {
-		return recvFrom(wg, &pipe.ProxyConn, pipe.conn, s.config.MaxMsgSize)
+	wg.Go("Server recvFrom"+" "+sess.conn.Info(), func() error {
+		return recvFrom(wg, &sess.ProxyConn, sess.conn, s.config.MaxMsgSize)
 	})
 
-	wg.Go("Server sendTo"+" "+pipe.conn.Info(), func() error {
-		return sendTo(wg, sendq, &pipe.ProxyConn, pipe.conn, s.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
+	wg.Go("Server sendTo"+" "+sess.conn.Info(), func() error {
+		return sendTo(wg, sess.sendq, &sess.ProxyConn, sess.conn, s.config.MaxMsgSize, &pingflag, &pongflag, &pongtime)
 	})
 
-	wg.Go("Server checkPingActive"+" "+pipe.conn.Info(), func() error {
+	wg.Go("Server checkPingActive"+" "+sess.conn.Info(), func() error {
 		authTimeout := s.config.AuthTimeout
 		if authTimeout <= 0 {
 			authTimeout = s.config.EstablishedTimeout
 		}
-		err := checkPingActive(wg, &pipe.ProxyConn, authTimeout, s.config.PingInter, s.config.PingTimeoutInter, s.config.ShowPing, &pingflag)
-		if err != nil {
-			pipe.markGray(err.Error())
-		}
-		return err
+		return checkPingActive(wg, &sess.ProxyConn, authTimeout, s.config.PingInter, s.config.PingTimeoutInter, s.config.ShowPing, &pingflag)
 	})
 
-	wg.Go("Server checkNeedClose"+" "+pipe.conn.Info(), func() error {
-		return checkNeedClose(wg, &pipe.ProxyConn)
+	wg.Go("Server checkNeedClose"+" "+sess.conn.Info(), func() error {
+		return checkNeedClose(wg, &sess.ProxyConn)
 	})
 
-	wg.Go("Server processPipe"+" "+pipe.conn.Info(), func() error {
-		return s.processPipe(wg, recvq, pipe, &sessionRef, &pongflag, &pongtime)
+	wg.Go("Server processConn"+" "+sess.conn.Info(), func() error {
+		return s.processConn(wg, sess, &pongflag, &pongtime)
 	})
 
-	if err := s.sendAuthChallenge(pipe); err != nil {
-		// Runs on the server root group: stop/clean up just this pipe's
+	wg.Go("Server processSession"+" "+sess.conn.Info(), func() error {
+		s.processSession(wg, sess)
+		return nil
+	})
+
+	if err := s.sendAuthChallenge(sess); err != nil {
+		// Runs on the server root group: stop/clean up just this conn's
 		// group and return; never propagate the error or the whole server
 		// (and every client session) exits.
-		loggo.Error("servePipe sendAuthChallenge fail %s %s", pipe.conn.Info(), err.Error())
+		loggo.Error("serveConn sendAuthChallenge fail %s %s", sess.conn.Info(), err.Error())
 		wg.Stop()
 		wg.Wait()
 		return
 	}
 
 	wg.Wait()
-	loggo.Info("servePipe close %s", pipe.conn.Info())
+	loggo.Info("serveConn close %s", sess.conn.Info())
 }
 
-func (s *Server) onPipeGone(sess *ClientConn) {
-	if sess.hub == nil {
-		return
-	}
-	if sess.hub.liveCount() > 0 {
-		return
-	}
-	loggo.Info("session %d all pipes gone, tear down", sess.clientID)
-	sess.closeServices()
-	sess.CloseChannels()
-	sess.setEstablished(false)
-	if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
-		atomic.AddInt32(&s.clientNum, -1)
-	}
-}
-
-func (s *Server) sendAuthChallenge(pipe *mainPipe) error {
+func (s *Server) sendAuthChallenge(sess *ClientConn) error {
 	ch, err := makeAuthChallenge()
 	if err != nil {
 		return err
 	}
-	pipe.authChallenge = ch
+	sess.authChallenge = ch
 	f := &ProxyFrame{
 		Type:               FRAME_TYPE_AUTH_CHALLENGE,
 		AuthChallengeFrame: &AuthChallengeFrame{Challenge: ch},
 	}
-	pipe.SendFrame(f)
-	loggo.Info("sendAuthChallenge to %s", pipe.conn.Info())
+	sess.SendFrame(f)
+	loggo.Info("sendAuthChallenge to %s", sess.conn.Info())
 	return nil
 }
 
-func (s *Server) processPipe(wg *thread.Group, recvq *prioQueue, pipe *mainPipe, sessionRef *atomic.Pointer[ClientConn], pongflag *int32, pongtime *int64) error {
-	loggo.Info("processPipe start %s", pipe.conn.Info())
+func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32, pongtime *int64) error {
+	loggo.Info("processConn start %s", sess.conn.Info())
 
 	for !isExit(wg) {
-		v, closed, ok := recvq.PopWait(time.Second)
+		v, closed, ok := sess.recvq.PopWait(time.Second)
 		if !ok {
 			if closed {
 				break
@@ -279,86 +274,63 @@ func (s *Server) processPipe(wg *thread.Group, recvq *prioQueue, pipe *mainPipe,
 
 		switch f.Type {
 		case FRAME_TYPE_LOGIN:
-			s.processLogin(f, pipe, sessionRef)
-
-		case FRAME_TYPE_CHANNEL_JOIN:
-			s.processChannelJoin(f, pipe, sessionRef)
+			s.processLogin(f, sess)
 
 		case FRAME_TYPE_PING:
-			processPing(f, &pipe.ProxyConn, pongflag, pongtime)
+			processPing(f, &sess.ProxyConn, pongflag, pongtime)
 
 		case FRAME_TYPE_PONG:
-			rtt := processPong(f, &pipe.ProxyConn, s.config.ShowPing)
-			pipe.noteRTT(rtt)
-
-		case FRAME_TYPE_SPEEDTEST:
-			s.processSpeedTest(f, pipe)
+			rtt := processPong(f, &sess.ProxyConn, s.config.ShowPing)
+			sess.noteRTT(rtt)
 
 		case FRAME_TYPE_DATA, FRAME_TYPE_OPEN, FRAME_TYPE_OPENRSP, FRAME_TYPE_CLOSE:
-			if sess := sessionRef.Load(); sess != nil {
-				sess.RecvFrame(f)
+			if sess.isEstablished() {
+				sess.deliverBusiness(f)
 			}
 
 		case FRAME_TYPE_AUTH_CHALLENGE:
-			loggo.Error("server unexpected AUTH_CHALLENGE from %s", pipe.conn.Info())
+			loggo.Error("server unexpected AUTH_CHALLENGE from %s", sess.conn.Info())
 
 		default:
-			loggo.Error("processPipe unexpected %s from %s", f.Type.String(), pipe.conn.Info())
+			loggo.Error("processConn unexpected %s from %s", f.Type.String(), sess.conn.Info())
 		}
 	}
-	loggo.Info("processPipe end %s", pipe.conn.Info())
+	loggo.Info("processConn end %s", sess.conn.Info())
 	return nil
 }
 
-func (s *Server) processSpeedTest(f *ProxyFrame, pipe *mainPipe) {
-	st := f.SpeedTestFrame
-	if st == nil || st.Echo {
-		return
-	}
-	echo := &ProxyFrame{
-		Type: FRAME_TYPE_SPEEDTEST,
-		SpeedTestFrame: &SpeedTestFrame{
-			Id:       st.Id,
-			SendTime: st.SendTime,
-			Payload:  st.Payload,
-			Echo:     true,
-		},
-	}
-	pipe.SendFrame(echo)
-}
-
-func (s *Server) processLogin(f *ProxyFrame, pipe *mainPipe, sessionRef *atomic.Pointer[ClientConn]) {
-	loggo.Info("processLogin from %s name=%s", pipe.conn.Info(), f.LoginFrame.Name)
+func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
+	loggo.Info("processLogin from %s name=%s", sess.conn.Info(), f.LoginFrame.Name)
 
 	rf := &ProxyFrame{}
 	rf.Type = FRAME_TYPE_LOGINRSP
 	rf.LoginRspFrame = &LoginRspFrame{}
 
-	ch := pipe.authChallenge
-	pipe.authChallenge = nil
+	ch := sess.authChallenge
+	sess.authChallenge = nil
 	authOK := verifyAuthProof(s.config.Key, ch, f.LoginFrame.AuthProof)
 	if !authOK {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "auth proof error"
-		pipe.SendFrame(rf)
-		pipe.setNeedClose()
-		loggo.Error("processLogin auth proof fail %s", pipe.conn.Info())
+		sess.SendFrame(rf)
+		sess.setNeedClose()
+		loggo.Error("processLogin auth proof fail %s", sess.conn.Info())
 		return
 	}
 
-	if sessionRef.Load() != nil {
+	if sess.isEstablished() {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "has established before"
-		pipe.SendFrame(rf)
-		loggo.Error("processLogin fail has established before %s", pipe.conn.Info())
+		sess.SendFrame(rf)
+		loggo.Error("processLogin fail has established before %s", sess.conn.Info())
 		return
 	}
 
 	if s.clientSize() >= s.config.MaxClient {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "max client"
-		pipe.SendFrame(rf)
-		loggo.Error("processLogin max client %s", pipe.conn.Info())
+		sess.SendFrame(rf)
+		loggo.Error("processLogin max client %s", sess.conn.Info())
 		return
 	}
 
@@ -366,114 +338,47 @@ func (s *Server) processLogin(f *ProxyFrame, pipe *mainPipe, sessionRef *atomic.
 	if err != nil {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = err.Error()
-		pipe.SendFrame(rf)
-		loggo.Error("processLogin codec negotiate fail %s %s", pipe.conn.Info(), err.Error())
+		sess.SendFrame(rf)
+		loggo.Error("processLogin codec negotiate fail %s %s", sess.conn.Info(), err.Error())
 		return
 	}
 	codec := defaultFrameCodec(s.config)
 	codec.CompressType = agreeC
 	codec.EncryptType = agreeE
-	pipe.setCodec(codec)
-
-	hub := newChannelHub(s.config)
-	sess := &ClientConn{
-		ProxyConn: ProxyConn{
-			recvq:  newPrioQueue(s.config.MainBuffer),
-			router: hub,
-		},
-		clienttype: f.LoginFrame.Clienttype,
-		name:       f.LoginFrame.Name,
-		hub:        hub,
-	}
 	sess.setCodec(codec)
+
+	sess.clienttype = f.LoginFrame.Clienttype
+	sess.name = f.LoginFrame.Name
 	sess.clientID = atomic.AddUint64(&s.nextClientID, 1)
 
-	err = s.iniService(s.wg, f, sess)
-	if err != nil {
+	if err := s.iniService(s.wg, f, sess); err != nil {
 		rf.LoginRspFrame.Ret = false
 		rf.LoginRspFrame.Msg = "iniService fail"
-		pipe.SendFrame(rf)
-		loggo.Error("processLogin iniService fail %s name=%s %s", pipe.conn.Info(), sess.name, err)
+		sess.SendFrame(rf)
+		loggo.Error("processLogin iniService fail %s name=%s %s", sess.conn.Info(), sess.name, err)
 		return
 	}
 
 	s.clients.Store(sess.clientID, sess)
 	atomic.AddInt32(&s.clientNum, 1)
-	sessionRef.Store(sess)
-	hub.add(pipe)
-	pipe.markActive("login")
-	pipe.setEstablished(true)
 	sess.setEstablished(true)
-
-	goSafe(s.wg, "Server processSession "+strconv.FormatUint(sess.clientID, 10), func() {
-		s.processSession(s.wg, sess)
-	})
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
 	rf.LoginRspFrame.CompressType = agreeC
 	rf.LoginRspFrame.EncryptType = agreeE
 	rf.LoginRspFrame.SessionId = sess.clientID
-	pipe.SendFrame(rf)
+	sess.SendFrame(rf)
 
 	loggo.Info("processLogin ok %s name=%s session=%d services=%d compress=%s encrypt=%s",
-		pipe.conn.Info(), sess.name, sess.clientID, len(loginServicesOf(f.LoginFrame)),
+		sess.conn.Info(), sess.name, sess.clientID, len(loginServicesOf(f.LoginFrame)),
 		compressTypeName(agreeC), encryptTypeName(agreeE))
-}
-
-func (s *Server) processChannelJoin(f *ProxyFrame, pipe *mainPipe, sessionRef *atomic.Pointer[ClientConn]) {
-	rf := &ProxyFrame{}
-	rf.Type = FRAME_TYPE_CHANNEL_JOIN_RSP
-	rf.ChannelJoinRspFrame = &ChannelJoinRspFrame{}
-
-	ch := pipe.authChallenge
-	pipe.authChallenge = nil
-	authOK := verifyAuthProof(s.config.Key, ch, f.ChannelJoinFrame.AuthProof)
-	if !authOK {
-		rf.ChannelJoinRspFrame.Ret = false
-		rf.ChannelJoinRspFrame.Msg = "auth proof error"
-		pipe.SendFrame(rf)
-		pipe.setNeedClose()
-		loggo.Error("processChannelJoin auth fail %s", pipe.conn.Info())
-		return
-	}
-
-	v, ok := s.clients.Load(f.ChannelJoinFrame.SessionId)
-	if !ok {
-		rf.ChannelJoinRspFrame.Ret = false
-		rf.ChannelJoinRspFrame.Msg = "unknown session"
-		pipe.SendFrame(rf)
-		loggo.Error("processChannelJoin unknown session %d from %s", f.ChannelJoinFrame.SessionId, pipe.conn.Info())
-		return
-	}
-	sess := v.(*ClientConn)
-	if !sess.isEstablished() {
-		rf.ChannelJoinRspFrame.Ret = false
-		rf.ChannelJoinRspFrame.Msg = "session not ready"
-		pipe.SendFrame(rf)
-		return
-	}
-
-	pipe.setCodec(sess.getCodec())
-	sessionRef.Store(sess)
-	sess.hub.add(pipe)
-	pipe.markActive("join")
-	pipe.setEstablished(true)
-
-	rf.ChannelJoinRspFrame.Ret = true
-	rf.ChannelJoinRspFrame.Msg = "ok"
-	pipe.SendFrame(rf)
-	loggo.Info("processChannelJoin ok %s session=%d", pipe.conn.Info(), sess.clientID)
 }
 
 func (s *Server) processSession(wg *thread.Group, sess *ClientConn) {
 	loggo.Info("processSession start %d", sess.clientID)
-	recvq := sess.recvq
 	for !isExit(wg) {
-		if !sess.isEstablished() && sess.hub != nil && sess.hub.liveCount() == 0 {
-			break
-		}
-		v, closed, ok := recvq.PopWait(time.Second)
+		v, closed, ok := sess.bizq.PopWait(time.Second)
 		if !ok {
 			if closed {
 				break

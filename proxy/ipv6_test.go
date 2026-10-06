@@ -219,7 +219,7 @@ func startIPv6Mode(t *testing.T, mode, proto string) *e2eHarness {
 	if mode == "PROXY" {
 		toAddrs = []string{h.echoAddr}
 	}
-	h.client, err = NewClient(h.cfg, []string{proto}, h.serverAddrs, "e2e_ipv6_"+mode+"_"+proto,
+	h.client, err = NewClient(h.cfg, proto, h.serverAddrs[0], "e2e_ipv6_"+mode+"_"+proto,
 		mode, []string{"tcp"}, []string{h.clientAddr}, toAddrs)
 	if err != nil {
 		h.Close()
@@ -305,7 +305,7 @@ func TestE2E_IPv6_SOCKS5UDPAssociate(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_ipv6_socks5_udp",
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_ipv6_socks5_udp",
 		"SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
@@ -421,7 +421,7 @@ func TestE2E_IPv6_RICMP_ForwardProxy(t *testing.T) {
 		t.Fatalf("NewServer v6 ricmp: %v", err)
 	}
 
-	h.client, err = NewClient(h.cfg, []string{"ricmp"}, h.serverAddrs, "e2e_ipv6_ricmp_PROXY",
+	h.client, err = NewClient(h.cfg, "ricmp", h.serverAddrs[0], "e2e_ipv6_ricmp_PROXY",
 		"PROXY", []string{"tcp"}, []string{h.clientAddr}, []string{h.echoAddr})
 	if err != nil {
 		h.Close()

@@ -234,7 +234,7 @@ func startProxyMode(t *testing.T, proto string, cfg *Config, mode string, extraS
 		t.Fatalf("unknown mode %s", mode)
 	}
 
-	h.client, err = NewClient(h.cfg, protos, addrs, "e2e_"+mode+"_"+proto, mode, clientProtos, fromAddrs, toAddrs)
+	h.client, err = NewClient(h.cfg, proto, addrs[0], "e2e_"+mode+"_"+proto, mode, clientProtos, fromAddrs, toAddrs)
 	if err != nil {
 		h.server.Close()
 		h.stopEcho()
@@ -246,56 +246,6 @@ func startProxyMode(t *testing.T, proto string, cfg *Config, mode string, extraS
 	if err != nil {
 		h.Close()
 		t.Fatalf("wait %s %s/%s: %v", waitAddr, mode, proto, err)
-	}
-	conn.Close()
-	return h
-}
-
-func startMultiPathProxy(t *testing.T, cfg *Config) *e2eHarness {
-	t.Helper()
-	h := &e2eHarness{t: t, proto: "tcp+tcp", cfg: cfg, mode: "PROXY"}
-	h.echoAddr, h.stopEcho = startTCPEchoServer(t)
-	addr1 := freeListenAddr(t, "tcp")
-	addr2 := freeListenAddr(t, "tcp")
-	h.serverAddrs = []string{addr1, addr2}
-	h.clientAddr = fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
-
-	var err error
-	h.server, err = NewServer(cfg, []string{"tcp", "tcp"}, h.serverAddrs)
-	if err != nil {
-		h.stopEcho()
-		t.Fatalf("NewServer multipath: %v", err)
-	}
-	h.client, err = NewClient(cfg, []string{"tcp", "tcp"}, h.serverAddrs, "e2e_mp", "PROXY",
-		[]string{"tcp"}, []string{h.clientAddr}, []string{h.echoAddr})
-	if err != nil {
-		h.server.Close()
-		h.stopEcho()
-		t.Fatalf("NewClient multipath: %v", err)
-	}
-
-	deadline := time.Now().Add(8 * time.Second)
-	for {
-		h.client.connMu.Lock()
-		sess := h.client.serverconn
-		n := 0
-		if sess != nil && sess.hub != nil {
-			n = sess.hub.liveCount()
-		}
-		h.client.connMu.Unlock()
-		if n >= 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			h.Close()
-			t.Fatalf("timed out waiting for 2 pipes, have %d", n)
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	conn, err := waitForPort(h.clientAddr, 5*time.Second)
-	if err != nil {
-		h.Close()
-		t.Fatalf("wait multipath client: %v", err)
 	}
 	conn.Close()
 	return h
@@ -320,30 +270,6 @@ func (h *e2eHarness) Dial(timeout time.Duration) net.Conn {
 		h.t.Fatalf("dial proxy: %v", err)
 	}
 	return conn
-}
-
-func (h *e2eHarness) livePipes() int {
-	h.client.connMu.Lock()
-	defer h.client.connMu.Unlock()
-	if h.client.serverconn == nil || h.client.serverconn.hub == nil {
-		return 0
-	}
-	return h.client.serverconn.hub.liveCount()
-}
-
-func (h *e2eHarness) killOnePipe() {
-	h.t.Helper()
-	h.client.connMu.Lock()
-	sess := h.client.serverconn
-	h.client.connMu.Unlock()
-	if sess == nil || sess.hub == nil {
-		h.t.Fatal("no session hub")
-	}
-	pipes := sess.hub.snapshot()
-	if len(pipes) == 0 {
-		h.t.Fatal("no pipes to kill")
-	}
-	pipes[0].conn.Close()
 }
 
 func fillPattern(b []byte, seed byte) {

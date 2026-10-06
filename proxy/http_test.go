@@ -104,7 +104,7 @@ func TestE2E_HTTPProxy_Forward(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "http_client", "HTTP", []string{"tcp"}, []string{httpAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "http_client", "HTTP", []string{"tcp"}, []string{httpAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestE2E_HTTPProxy_Reverse(t *testing.T) {
 	defer server.Close()
 
 	// Reverse HTTP client: connects to server, asks server to listen on httpAddr
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "rev_http_client", "REVERSE_HTTP", []string{"tcp"}, []string{httpAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "rev_http_client", "REVERSE_HTTP", []string{"tcp"}, []string{httpAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -289,7 +289,7 @@ func TestE2E_HTTPProxy_NoAuth(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "http_client_noauth", "HTTP", []string{"tcp"}, []string{httpAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "http_client_noauth", "HTTP", []string{"tcp"}, []string{httpAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
