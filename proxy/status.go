@@ -7,20 +7,31 @@ import (
 	"net"
 	"net/http"
 	"runtime"
-	"sync/atomic"
 	"time"
 
 	"github.com/esrrhs/gohome/loggo"
 	"github.com/esrrhs/spp/version"
 )
 
-// PipeStatus is the status snapshot of one underlay pipe.
+// PipeStatus is the status snapshot of the session's single underlay conn.
 type PipeStatus struct {
-	Proto  string `json:"proto"`
-	Addr   string `json:"addr"`
-	State  string `json:"state"` // active / gray / dead
-	RttMs  int64  `json:"rttMs"`
-	ThrBps int64  `json:"thrBps"`
+	Proto string `json:"proto"`
+	Addr  string `json:"addr"`
+	RttMs int64  `json:"rttMs"`
+}
+
+// pipeStatus describes one session's single underlay connection.
+func pipeStatusOf(p *ProxyConn) PipeStatus {
+	proto, addr := "", ""
+	if p.conn != nil {
+		proto = p.conn.Name()
+		addr = p.conn.Info()
+	}
+	return PipeStatus{
+		Proto: proto,
+		Addr:  addr,
+		RttMs: int64(p.rtt() / time.Millisecond),
+	}
 }
 
 // ServiceStatus describes one configured proxy service and its live sonnies.
@@ -63,36 +74,6 @@ func baseStatusReport(role, name string) StatusReport {
 	}
 }
 
-// pipeStatuses returns an atomic snapshot of every pipe in the hub.
-func (h *channelHub) pipeStatuses() []PipeStatus {
-	pipes := h.snapshot()
-	out := make([]PipeStatus, 0, len(pipes))
-	for _, p := range pipes {
-		rtt := atomic.LoadInt64(&p.rttNs)
-		out = append(out, PipeStatus{
-			Proto:  p.proto,
-			Addr:   p.addr,
-			State:  pipeStateName(atomic.LoadInt32(&p.state)),
-			RttMs:  rtt / int64(time.Millisecond),
-			ThrBps: atomic.LoadInt64(&p.thrBps),
-		})
-	}
-	return out
-}
-
-func pipeStateName(st int32) string {
-	switch st {
-	case pipeActive:
-		return "active"
-	case pipeGray:
-		return "gray"
-	case pipeDead:
-		return "dead"
-	default:
-		return "unknown"
-	}
-}
-
 // servicesStatus collects per-service sonny counts from input/output lists.
 func servicesStatus(inputs []*Inputer, outputs []*Outputer) ([]ServiceStatus, int) {
 	services := make([]ServiceStatus, 0, len(inputs)+len(outputs))
@@ -121,7 +102,7 @@ func servicesStatus(inputs []*Inputer, outputs []*Outputer) ([]ServiceStatus, in
 }
 
 // SnapshotStatus builds a status report for a running server, aggregating all
-// client sessions, their services, pipes, and live counters.
+// client sessions, their services, the single underlay pipe, and live counters.
 func (s *Server) SnapshotStatus() StatusReport {
 	r := baseStatusReport("server", "")
 	r.Clients = s.clientSize()
@@ -138,9 +119,7 @@ func (s *Server) SnapshotStatus() StatusReport {
 		svcs, n := servicesStatus(inputs, outputs)
 		services = append(services, svcs...)
 		sonny += n
-		if sess.hub != nil {
-			pipes = append(pipes, sess.hub.pipeStatuses()...)
-		}
+		pipes = append(pipes, pipeStatusOf(&sess.ProxyConn))
 		return true
 	})
 	r.Pipes = pipes
@@ -150,7 +129,7 @@ func (s *Server) SnapshotStatus() StatusReport {
 }
 
 // SnapshotStatus builds a status report for a running client and its current
-// logical server session (nil before login / after all-pipes teardown).
+// server session (nil before login / while reconnecting).
 func (c *Client) SnapshotStatus() StatusReport {
 	r := baseStatusReport("client", c.name)
 
@@ -166,10 +145,7 @@ func (c *Client) SnapshotStatus() StatusReport {
 	svcs, sonny := servicesStatus(inputs, outputs)
 	r.Services = svcs
 	r.Sonny = sonny
-
-	if sess.hub != nil {
-		r.Pipes = sess.hub.pipeStatuses()
-	}
+	r.Pipes = []PipeStatus{pipeStatusOf(&sess.ProxyConn)}
 	return r
 }
 

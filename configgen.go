@@ -101,14 +101,6 @@ func allMainListens(protos []string) []string {
 	return out
 }
 
-func allMainServers(protos []string, host string) []string {
-	out := make([]string, len(protos))
-	for i, p := range protos {
-		out[i] = defaultServerAddr(p, host, i)
-	}
-	return out
-}
-
 func commonDefaults(key, encrypt string) ConfigFile {
 	return ConfigFile{
 		Key:          key,
@@ -135,11 +127,11 @@ func defaultServerConfig(key, encrypt string) ConfigFile {
 
 func defaultClientConfig(clientType, key, encrypt string) (ConfigFile, error) {
 	clientType = strings.ToLower(strings.TrimSpace(clientType))
-	protos := allMainProtos()
 	cfg := commonDefaults(key, encrypt)
 	cfg.Type = clientType
-	cfg.Proto = protos
-	cfg.Servers = allMainServers(protos, defaultClientHost)
+	// A client always uses one underlay; the server still listens on all.
+	cfg.Proto = []string{"tcp"}
+	cfg.Server = defaultServerAddr("tcp", defaultClientHost, 0)
 
 	switch clientType {
 	case "proxy_client":
@@ -196,7 +188,8 @@ func writeJSONConfig(path string, cfg ConfigFile, force bool) error {
 	return os.WriteFile(path, data, 0o600)
 }
 
-// generateConfigs writes one multi-path server config and one client config per proxy mode.
+// generateConfigs writes one multi-listener server config and one client
+// config per proxy mode (all clients use a single tcp underlay).
 func generateConfigs(outdir string, force bool) error {
 	if outdir == "" {
 		outdir = "."
@@ -234,7 +227,7 @@ func generateConfigs(outdir string, force bool) error {
 	fmt.Println()
 	fmt.Println("shared auth/encrypt keys filled with random secrets")
 	fmt.Printf("server listens all main channels: %v\n", serverCfg.Proto)
-	fmt.Printf("clients dial all main channels:   %v\n", serverCfg.Proto)
+	fmt.Println("clients dial tcp:               127.0.0.1:8888")
 	fmt.Println()
 	fmt.Printf("start server:              ./spp -config %s\n", serverPath)
 	fmt.Printf("start forward proxy:       ./spp -config %s\n", filepath.Join(outdir, "config_proxy_client.json"))
