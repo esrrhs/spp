@@ -74,20 +74,6 @@ func TestGoSafe_PanicInTaskDoesNotKillGroup(t *testing.T) {
 	}
 }
 
-func TestPipeStateName(t *testing.T) {
-	cases := map[int32]string{
-		pipeActive: "active",
-		pipeGray:   "gray",
-		pipeDead:   "dead",
-		99:         "unknown",
-	}
-	for st, want := range cases {
-		if got := pipeStateName(st); got != want {
-			t.Fatalf("pipeStateName(%d)=%q want %q", st, got, want)
-		}
-	}
-}
-
 func TestStartStatusServer_NilCollector(t *testing.T) {
 	if _, err := StartStatusServer("127.0.0.1:0", nil); err == nil {
 		t.Fatal("nil collector must error")
@@ -225,12 +211,12 @@ func TestSnapshotStatus_ServerAndClient(t *testing.T) {
 	defer conn.Close()
 	echoRoundTrip(t, conn, []byte("status-ping"), 10*time.Second)
 
-	// Client session should be established with one active pipe.
+	// Client session should be established with exactly one tcp pipe.
 	deadline := time.Now().Add(8 * time.Second)
 	var cr StatusReport
 	for time.Now().Before(deadline) {
 		cr = h.client.SnapshotStatus()
-		if cr.Established && len(cr.Pipes) >= 1 {
+		if cr.Established && len(cr.Pipes) == 1 {
 			break
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -241,17 +227,11 @@ func TestSnapshotStatus_ServerAndClient(t *testing.T) {
 	if !cr.Established {
 		t.Fatal("client snapshot never reported established session")
 	}
-	if len(cr.Pipes) < 1 {
-		t.Fatal("client snapshot has no pipes")
+	if len(cr.Pipes) != 1 {
+		t.Fatalf("client pipes=%+v want exactly one", cr.Pipes)
 	}
-	foundActive := false
-	for _, p := range cr.Pipes {
-		if p.Proto == "tcp" && p.State == "active" {
-			foundActive = true
-		}
-	}
-	if !foundActive {
-		t.Fatalf("no active tcp pipe: %+v", cr.Pipes)
+	if cr.Pipes[0].Proto != "tcp" {
+		t.Fatalf("pipe proto=%q want tcp: %+v", cr.Pipes[0].Proto, cr.Pipes[0])
 	}
 	if len(cr.Services) == 0 {
 		t.Fatal("client snapshot has no services")
@@ -260,7 +240,7 @@ func TestSnapshotStatus_ServerAndClient(t *testing.T) {
 		t.Fatalf("runtime fields missing: %+v", cr)
 	}
 
-	// Server side: one client session with an active pipe and the sonny.
+	// Server side: one client session with one pipe and the sonny.
 	sr := h.server.SnapshotStatus()
 	if sr.Role != "server" {
 		t.Fatalf("server role=%q", sr.Role)
@@ -268,8 +248,8 @@ func TestSnapshotStatus_ServerAndClient(t *testing.T) {
 	if sr.Clients < 1 {
 		t.Fatalf("server clients=%d", sr.Clients)
 	}
-	if len(sr.Pipes) < 1 {
-		t.Fatal("server snapshot has no pipes")
+	if len(sr.Pipes) != 1 || sr.Pipes[0].Proto != "tcp" {
+		t.Fatalf("server pipes=%+v want one tcp pipe", sr.Pipes)
 	}
 	if sr.Sonny < 1 {
 		t.Fatalf("server sonny=%d want >=1", sr.Sonny)

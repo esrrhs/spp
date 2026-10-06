@@ -208,7 +208,7 @@ func TestAuthFailFlood_WrongKeyClients(t *testing.T) {
 		ccfg.Encrypt = ""
 		ccfg.EncryptType = EncryptNone
 		ccfg.CompressType = CompressNone
-		c, err := NewClient(ccfg, []string{"tcp"}, []string{addr}, "bad", "PROXY",
+		c, err := NewClient(ccfg, "tcp", addr, "bad", "PROXY",
 			[]string{"tcp"}, []string{caddr}, []string{"127.0.0.1:9"})
 		if err != nil {
 			t.Fatalf("NewClient: %v", err)

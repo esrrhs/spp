@@ -59,55 +59,6 @@ func TestE2E_FullMatrix(t *testing.T) {
 	}
 }
 
-func TestE2E_MultiPath_FailoverKeepsProxying(t *testing.T) {
-	cfg := testConfig("multipath-failover-secret-ok")
-	cfg.ProbeInter = 1
-	cfg.ProbeSize = 1024
-	h := startMultiPathProxy(t, cfg)
-	defer h.Close()
-
-	if h.livePipes() < 2 {
-		t.Fatalf("need 2 pipes, have %d", h.livePipes())
-	}
-
-	c := h.Dial(5 * time.Second)
-	msg := []byte("before-failover")
-	echoRoundTrip(t, c, msg, 10*time.Second)
-
-	h.killOnePipe()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for h.livePipes() >= 2 && time.Now().Before(deadline) {
-		time.Sleep(50 * time.Millisecond)
-	}
-	if h.livePipes() < 1 {
-		t.Fatal("all pipes gone after killing one")
-	}
-
-	// Existing or new conn should still work via remaining pipe.
-	msg2 := []byte("after-failover-still-ok")
-	_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-	if _, err := c.Write(msg2); err != nil {
-		c.Close()
-		c = h.Dial(5 * time.Second)
-		echoRoundTrip(t, c, msg2, 10*time.Second)
-	} else {
-		got := make([]byte, len(msg2))
-		if _, err := io.ReadFull(c, got); err != nil {
-			t.Fatalf("read after failover: %v", err)
-		}
-		if sha256.Sum256(got) != sha256.Sum256(msg2) {
-			t.Fatal("integrity after failover")
-		}
-	}
-	c.Close()
-
-	// New connection after failover.
-	c2 := h.Dial(5 * time.Second)
-	defer c2.Close()
-	echoRoundTrip(t, c2, []byte("new-conn-after-failover"), 10*time.Second)
-}
-
 func TestE2E_Lifecycle_CloseWrite(t *testing.T) {
 	h := startForwardProxy(t, "tcp", "lifecycle-closewrite-secret")
 	defer h.Close()
@@ -208,7 +159,7 @@ func TestE2E_Lifecycle_ReconnectAfterClientRestart(t *testing.T) {
 	defer server.Close()
 
 	startClient := func(from string) *Client {
-		c, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "re", "PROXY",
+		c, err := NewClient(cfg, "tcp", serverAddr, "re", "PROXY",
 			[]string{"tcp"}, []string{from}, []string{echoAddr})
 		if err != nil {
 			t.Fatalf("NewClient: %v", err)
@@ -404,7 +355,7 @@ func TestE2E_Underlay_RhttpAndRicmp(t *testing.T) {
 			}
 			defer server.Close()
 
-			client, err := NewClient(cfg, []string{proto}, []string{serverAddr}, "sp_"+proto, "PROXY",
+			client, err := NewClient(cfg, proto, serverAddr, "sp_"+proto, "PROXY",
 				[]string{"tcp"}, []string{clientAddr}, []string{echoAddr})
 			if err != nil {
 				t.Skipf("NewClient(%s): %v", proto, err)

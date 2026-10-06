@@ -75,7 +75,7 @@ message LoginRspFrame {
     // Agreed session codecs (echoed by server on success).
     COMPRESS_TYPE compress_type = 3;
     ENCRYPT_TYPE encrypt_type = 4;
-    // Server-local session id; extra underlay pipes CHANNEL_JOIN with this id.
+    // Server-local session id (informational).
     uint64 session_id = 5;
 }
 
@@ -83,23 +83,27 @@ message AuthChallengeFrame {
     bytes challenge = 1;
 }
 
-// Attach another underlay pipe to an existing session (same logical client).
+// Deprecated: multi-path CHANNEL_JOIN was removed; one client uses one conn.
+// Field numbers stay reserved for wire-format stability; peers must not send these.
 message ChannelJoinFrame {
-    uint64 session_id = 1;
-    bytes auth_proof = 2;
+    option deprecated = true;
+    uint64 session_id = 1 [deprecated = true];
+    bytes auth_proof = 2 [deprecated = true];
 }
 
 message ChannelJoinRspFrame {
-    bool ret = 1;
-    string msg = 2;
+    option deprecated = true;
+    bool ret = 1 [deprecated = true];
+    string msg = 2 [deprecated = true];
 }
 
-// Throughput / health probe. Server echoes with echo=true and same payload size.
+// Deprecated: throughput/health probe used by the removed multi-path scheduler.
 message SpeedTestFrame {
-    int64 id = 1;
-    int64 send_time = 2;
-    bytes payload = 3;
-    bool echo = 4;
+    option deprecated = true;
+    int64 id = 1 [deprecated = true];
+    int64 send_time = 2 [deprecated = true];
+    bytes payload = 3 [deprecated = true];
+    bool echo = 4 [deprecated = true];
 }
 
 message PingFrame {

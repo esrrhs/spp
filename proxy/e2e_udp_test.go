@@ -58,7 +58,7 @@ func TestE2E_UDP_ForwardProxy(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_udp_client", "PROXY", []string{"udp"}, []string{clientUDPAddr}, []string{echoAddr})
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_udp_client", "PROXY", []string{"udp"}, []string{clientUDPAddr}, []string{echoAddr})
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -122,7 +122,7 @@ func TestE2E_SOCKS5_UDPAssociate(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_socks5_udp", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_socks5_udp", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -223,7 +223,7 @@ func TestE2E_SOCKS5_SimultaneousTCPAndUDP(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_socks5_dual", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_socks5_dual", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestE2E_SOCKS5_UDPAssociateAuth(t *testing.T) {
 	}
 	defer server.Close()
 
-	client, err := NewClient(cfg, []string{"tcp"}, []string{serverAddr}, "test_socks5_auth", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_socks5_auth", "SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}

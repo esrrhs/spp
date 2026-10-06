@@ -483,18 +483,14 @@ func TestServer_ClientSizeClamp(t *testing.T) {
 	}
 }
 
-// ---- Server: login / join state machine -------------------------------------
+// ---- Server: login state machine --------------------------------------------
 
-func newPipeWithQueues(cfg *Config) *mainPipe {
-	// A fresh (unconnected) TcpConn is nil-safe: Info() reports "empty tcp
-	// conn", Close() is harmless. Real servePipe always carries a concrete
-	// accepted conn; direct state-machine tests use the empty stand-in.
+func newTestClientConn(cfg *Config) *ClientConn {
+	// An unconnected TcpConn is nil-safe (Info "empty tcp conn", Close no-op);
+	// real serveConn always carries the accepted conn.
+	s := &Server{config: cfg}
 	c, _ := network.NewConn("tcp")
-	p := &mainPipe{ProxyConn: ProxyConn{conn: c}, proto: "tcp", addr: "testpipe"}
-	p.sendq = newPrioQueue(64)
-	p.recvq = newPrioQueue(64)
-	p.setCodec(defaultFrameCodec(cfg))
-	return p
+	return s.newClientConn(c)
 }
 
 func startUnitTestServer(t *testing.T, cfg *Config) *Server {
@@ -507,84 +503,46 @@ func startUnitTestServer(t *testing.T, cfg *Config) *Server {
 	return s
 }
 
-func TestServer_LoginAndJoin_StateMachine(t *testing.T) {
+func TestServer_Login_StateMachine(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Key = "unit-auth-key"
 	s := startUnitTestServer(t, cfg)
 
-	// First pipe logs in with a valid challenge proof.
-	p1 := newPipeWithQueues(cfg)
+	// First LOGIN with a valid challenge proof establishes the session.
+	sess := newTestClientConn(cfg)
 	ch1, err := makeAuthChallenge()
 	if err != nil {
 		t.Fatal(err)
 	}
-	p1.authChallenge = ch1
-	var ref1 atomic.Pointer[ClientConn]
-	login := &ProxyFrame{LoginFrame: &LoginFrame{
+	sess.authChallenge = ch1
+	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
 		Name:       "unit",
 		Clienttype: CLIENT_TYPE_PROXY,
 		AuthProof:  computeAuthProof(cfg.Key, ch1),
 		Services:   []*LoginService{{Proxyproto: PROXY_PROTO_TCP}},
-	}}
-	s.processLogin(login, p1, &ref1)
-	lr := mustPopLoginRsp(t, p1.sendq)
+	}}, sess)
+	lr := mustPopLoginRsp(t, sess.sendq)
 	if !lr.Ret {
 		t.Fatalf("login rejected: %s", lr.Msg)
 	}
-	sess := ref1.Load()
-	if sess == nil || lr.SessionId == 0 {
+	if !sess.isEstablished() || lr.SessionId == 0 {
 		t.Fatal("session not established")
 	}
 	if s.clientSize() != 1 {
 		t.Fatalf("clientSize=%d", s.clientSize())
 	}
 
-	// A second LOGIN (with a fresh valid challenge proof) on a pipe already
-	// bound to a session is rejected by the established-session guard.
+	// A second LOGIN on the same conn is rejected by the established guard.
 	ch1b, _ := makeAuthChallenge()
-	p1.authChallenge = ch1b
+	sess.authChallenge = ch1b
 	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
 		Clienttype: CLIENT_TYPE_PROXY,
 		AuthProof:  computeAuthProof(cfg.Key, ch1b),
 		Services:   []*LoginService{{Proxyproto: PROXY_PROTO_TCP}},
-	}}, p1, &ref1)
-	lr2 := mustPopLoginRsp(t, p1.sendq)
+	}}, sess)
+	lr2 := mustPopLoginRsp(t, sess.sendq)
 	if lr2.Ret || lr2.Msg != "has established before" {
 		t.Fatalf("re-login got ret=%v msg=%q", lr2.Ret, lr2.Msg)
-	}
-
-	// Second pipe joins the existing session with a fresh challenge.
-	p2 := newPipeWithQueues(cfg)
-	ch2, _ := makeAuthChallenge()
-	p2.authChallenge = ch2
-	var ref2 atomic.Pointer[ClientConn]
-	s.processChannelJoin(&ProxyFrame{ChannelJoinFrame: &ChannelJoinFrame{
-		SessionId: lr.SessionId,
-		AuthProof: computeAuthProof(cfg.Key, ch2),
-	}}, p2, &ref2)
-	jr := mustPopJoinRsp(t, p2.sendq)
-	if !jr.Ret {
-		t.Fatalf("channel join rejected: %s", jr.Msg)
-	}
-	if ref2.Load() != sess {
-		t.Fatal("join attached to wrong session")
-	}
-	if sess.hub.liveCount() != 2 {
-		t.Fatalf("hub live=%d want 2", sess.hub.liveCount())
-	}
-
-	// Join with an unknown session id is rejected.
-	p3 := newPipeWithQueues(cfg)
-	ch3, _ := makeAuthChallenge()
-	p3.authChallenge = ch3
-	var ref3 atomic.Pointer[ClientConn]
-	s.processChannelJoin(&ProxyFrame{ChannelJoinFrame: &ChannelJoinFrame{
-		SessionId: 999999,
-		AuthProof: computeAuthProof(cfg.Key, ch3),
-	}}, p3, &ref3)
-	jr2 := mustPopJoinRsp(t, p3.sendq)
-	if jr2.Ret || jr2.Msg != "unknown session" {
-		t.Fatalf("unknown session got ret=%v msg=%q", jr2.Ret, jr2.Msg)
 	}
 }
 
@@ -593,54 +551,33 @@ func TestServer_Login_AuthAndMaxClient(t *testing.T) {
 	cfg.Key = "unit-auth-key-2"
 	s := startUnitTestServer(t, cfg)
 
-	// Bad proof is rejected and the pipe is killed.
-	p := newPipeWithQueues(cfg)
-	p.authChallenge = []byte("the-challenge")
-	var ref atomic.Pointer[ClientConn]
+	// Bad proof is rejected and the conn is killed.
+	sess := newTestClientConn(cfg)
+	sess.authChallenge = []byte("the-challenge")
 	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
 		Clienttype: CLIENT_TYPE_PROXY, AuthProof: []byte("wrong-proof"),
-	}}, p, &ref)
-	lr := mustPopLoginRsp(t, p.sendq)
+	}}, sess)
+	lr := mustPopLoginRsp(t, sess.sendq)
 	if lr.Ret || lr.Msg != "auth proof error" {
 		t.Fatalf("bad proof got ret=%v msg=%q", lr.Ret, lr.Msg)
 	}
-	if !p.isNeedClose() {
-		t.Fatal("bad proof must mark pipe needclose")
+	if !sess.isNeedClose() {
+		t.Fatal("bad proof must mark conn needclose")
 	}
 
 	// MaxClient zero rejects new sessions.
 	s.config.MaxClient = 0
-	p2 := newPipeWithQueues(cfg)
+	sess2 := newTestClientConn(cfg)
 	ch, _ := makeAuthChallenge()
-	p2.authChallenge = ch
-	var ref2 atomic.Pointer[ClientConn]
+	sess2.authChallenge = ch
 	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
 		Clienttype: CLIENT_TYPE_PROXY,
 		AuthProof:  computeAuthProof(cfg.Key, ch),
 		Services:   []*LoginService{{Proxyproto: PROXY_PROTO_TCP}},
-	}}, p2, &ref2)
-	lr2 := mustPopLoginRsp(t, p2.sendq)
+	}}, sess2)
+	lr2 := mustPopLoginRsp(t, sess2.sendq)
 	if lr2.Ret || lr2.Msg != "max client" {
 		t.Fatalf("maxclient got ret=%v msg=%q", lr2.Ret, lr2.Msg)
-	}
-}
-
-func TestServer_ChannelJoin_BadProof(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Key = "join-auth-key"
-	s := startUnitTestServer(t, cfg)
-	p := newPipeWithQueues(cfg)
-	p.authChallenge = []byte("ch")
-	var ref atomic.Pointer[ClientConn]
-	s.processChannelJoin(&ProxyFrame{ChannelJoinFrame: &ChannelJoinFrame{
-		SessionId: 1, AuthProof: []byte("bad"),
-	}}, p, &ref)
-	jr := mustPopJoinRsp(t, p.sendq)
-	if jr.Ret || jr.Msg != "auth proof error" {
-		t.Fatalf("bad join proof got ret=%v msg=%q", jr.Ret, jr.Msg)
-	}
-	if !p.isNeedClose() {
-		t.Fatal("bad join proof must needclose the pipe")
 	}
 }
 
@@ -657,20 +594,7 @@ func mustPopLoginRsp(t *testing.T, q *prioQueue) *LoginRspFrame {
 	return f.LoginRspFrame
 }
 
-func mustPopJoinRsp(t *testing.T, q *prioQueue) *ChannelJoinRspFrame {
-	t.Helper()
-	v, closed, ok := q.PopWait(3 * time.Second)
-	if !ok || closed {
-		t.Fatal("JOINRSP not delivered")
-	}
-	f := v.(*ProxyFrame)
-	if f.Type != FRAME_TYPE_CHANNEL_JOIN_RSP || f.ChannelJoinRspFrame == nil {
-		t.Fatalf("expected CHANNEL_JOIN_RSP, got %v", f.Type)
-	}
-	return f.ChannelJoinRspFrame
-}
-
-// ---- routing & client probe edge cases --------------------------------------
+// ---- routing edge cases -----------------------------------------------------
 
 func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
 	// Empty outputs: silently ignored.
@@ -691,34 +615,5 @@ func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
 	rsp := popOpenRsp(t, father.sendq, time.Second)
 	if rsp.Ret || rsp.Msg != "max sonny" {
 		t.Fatalf("dispatch got ret=%v msg=%q", rsp.Ret, rsp.Msg)
-	}
-}
-
-func TestClient_ProcessSpeedTest_EdgeCases(t *testing.T) {
-	c := &Client{config: DefaultConfig()}
-	p := &mainPipe{proto: "tcp", addr: "x"}
-	p.sendq = newPrioQueue(8)
-
-	// Nil SpeedTestFrame must not panic and must not reactivate.
-	atomic.StoreInt32(&p.state, pipeGray)
-	c.processSpeedTest(&ProxyFrame{Type: FRAME_TYPE_SPEEDTEST}, p)
-	if !p.isGray() {
-		t.Fatal("nil speedtest must be ignored")
-	}
-
-	// Echo timestamp in the future (elapsed<=0) is ignored.
-	c.processSpeedTest(&ProxyFrame{SpeedTestFrame: &SpeedTestFrame{
-		SendTime: time.Now().Add(time.Hour).UnixNano(), Payload: []byte("z"), Echo: true,
-	}}, p)
-	if !p.isGray() || atomic.LoadInt64(&p.thrBps) != 0 {
-		t.Fatal("future-dated echo must be ignored")
-	}
-
-	// Empty payload is counted as 1 byte for the bandwidth estimate.
-	c.processSpeedTest(&ProxyFrame{SpeedTestFrame: &SpeedTestFrame{
-		SendTime: time.Now().Add(-time.Millisecond).UnixNano(), Payload: nil, Echo: true,
-	}}, p)
-	if !p.isActive() || atomic.LoadInt64(&p.thrBps) <= 0 {
-		t.Fatal("valid echo with empty payload should activate and score the pipe")
 	}
 }

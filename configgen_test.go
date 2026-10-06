@@ -51,11 +51,11 @@ func TestGenerateConfigs(t *testing.T) {
 		if client.Key != server.Key || *client.Encrypt != *server.Encrypt {
 			t.Fatalf("%s secrets mismatch server", mode.File)
 		}
-		if len(client.Proto) != len(wantProtos) {
-			t.Fatalf("%s proto=%v", mode.File, client.Proto)
+		if len(client.Proto) != 1 || client.Proto[0] != "tcp" {
+			t.Fatalf("%s client proto=%v want single tcp", mode.File, client.Proto)
 		}
-		if len(client.Servers) != len(client.Proto) {
-			t.Fatalf("%s servers len %d != proto %d", mode.File, len(client.Servers), len(client.Proto))
+		if len(client.Servers) != 0 || client.Server != "127.0.0.1:8888" {
+			t.Fatalf("%s server=%q servers=%v want 127.0.0.1:8888", mode.File, client.Server, client.Servers)
 		}
 	}
 

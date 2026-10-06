@@ -9,7 +9,6 @@ import (
 	"net"
 	"strconv"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -213,64 +212,6 @@ func TestBufferedConn_PrefixOnly(t *testing.T) {
 	}
 	if string(out) != "ZABCD" {
 		t.Fatalf("got %q", out)
-	}
-}
-
-// ---- multipath formatting ----------------------------------------------------
-
-func TestFormatBps_AndItoa(t *testing.T) {
-	cases := []struct {
-		bps  int64
-		want string
-	}{
-		{0, "0B/s"},
-		{1, "1B/s"},
-		{1023, "1023B/s"},
-		{1500, "1KB/s"},
-		{2 << 20, "2MB/s"},
-		// Throughput tiers compare with >=, so pathological negative values
-		// always render through the raw B/s path (itoa keeps the minus sign).
-		{-1500, "-1500B/s"},
-		{-1, "-1B/s"},
-	}
-	for _, tc := range cases {
-		if got := formatBps(tc.bps); got != tc.want {
-			t.Errorf("formatBps(%d)=%q want %q", tc.bps, got, tc.want)
-		}
-	}
-	if got := itoa(0); got != "0" {
-		t.Fatalf("itoa(0)=%q", got)
-	}
-}
-
-func TestMainPipe_NoteRTT(t *testing.T) {
-	p := &mainPipe{}
-	p.noteRTT(0)
-	p.noteRTT(-5)
-	if atomic.LoadInt64(&p.rttNs) != 0 {
-		t.Fatal("non-positive RTT must be ignored")
-	}
-	p.noteRTT(7 * time.Millisecond)
-	if atomic.LoadInt64(&p.rttNs) != int64(7*time.Millisecond) {
-		t.Fatal("positive RTT not stored")
-	}
-}
-
-func TestChannelHub_StatusLine(t *testing.T) {
-	hub := newChannelHub(DefaultConfig())
-	a := &mainPipe{proto: "tcp", addr: "a"}
-	b := &mainPipe{proto: "rudp", addr: "b"}
-	hub.add(a)
-	hub.add(b)
-	atomic.StoreInt64(&a.thrBps, 1<<20)
-	atomic.StoreInt64(&a.rttNs, int64(time.Millisecond))
-	b.markGray("test gray")
-
-	line := hub.statusLine()
-	for _, want := range []string{"tcp=active", "rudp=gray", "thr=", "rtt="} {
-		if !strings.Contains(line, want) {
-			t.Fatalf("statusLine %q missing %q", line, want)
-		}
 	}
 }
 
