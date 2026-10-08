@@ -99,7 +99,6 @@ type ConfigFile struct {
 	Listen       []string `json:"listen,omitempty"`
 	Name         string   `json:"name,omitempty"`
 	Server       string   `json:"server,omitempty"`
-	Servers      []string `json:"servers,omitempty"`
 	FromAddr     []string `json:"fromaddr,omitempty"`
 	ToAddr       []string `json:"toaddr,omitempty"`
 	Key          string   `json:"key"`
@@ -219,12 +218,8 @@ func main() {
 		if !cliSet["name"] && fileCfg.Name != "" {
 			*name = fileCfg.Name
 		}
-		if len(servers) == 0 {
-			if len(fileCfg.Servers) > 0 {
-				servers = fileCfg.Servers
-			} else if fileCfg.Server != "" {
-				servers = []string{fileCfg.Server}
-			}
+		if len(servers) == 0 && fileCfg.Server != "" {
+			servers = []string{fileCfg.Server}
 		}
 		if len(fromaddr) == 0 && len(fileCfg.FromAddr) > 0 {
 			fromaddr = fileCfg.FromAddr
