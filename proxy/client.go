@@ -248,12 +248,6 @@ func (c *Client) runOnce() {
 	loggo.Info("runOnce close %s %s", c.proto, c.server)
 }
 
-func (c *Client) currentSession() *ServerConn {
-	c.connMu.Lock()
-	defer c.connMu.Unlock()
-	return c.serverconn
-}
-
 func (c *Client) processConn(wg *thread.Group, sess *ServerConn, pongflag *int32, pongtime *int64) error {
 	loggo.Info("processConn start %s %s", c.proto, c.server)
 
