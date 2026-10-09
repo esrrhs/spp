@@ -280,105 +280,22 @@ func main() {
 		}
 	}
 
-	for _, p := range protos {
-		if !network.HasReliableProto(p) {
-			fmt.Println("[proto] must be " + fmt.Sprintf("%v", network.SupportReliableProtos()) + "\n")
-			flag.Usage()
-			return
-		}
-	}
-
-	for _, p := range proxyproto {
-		if !network.HasProto(p) {
-			fmt.Println("[proxyproto] " + fmt.Sprintf("%v", network.SupportProtos()))
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-	}
-
-	if *t != "proxy_client" &&
-		*t != "reverse_proxy_client" &&
-		*t != "socks5_client" &&
-		*t != "reverse_socks5_client" &&
-		*t != "http_client" &&
-		*t != "reverse_http_client" &&
-		*t != "server" {
-		fmt.Println("[type] must be server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
+	normalizedProtos, verr := validateStartup(startupOptions{
+		typ:         *t,
+		protos:      protos,
+		proxyproto:  proxyproto,
+		listenaddrs: listenaddrs,
+		servers:     servers,
+		fromaddr:    fromaddr,
+		toaddr:      toaddr,
+	})
+	if verr != nil {
+		fmt.Println(verr.Error())
 		fmt.Println()
 		flag.Usage()
 		return
 	}
-
-	if *t == "proxy_client" ||
-		*t == "reverse_proxy_client" {
-		if !(len(fromaddr) == len(toaddr) && len(fromaddr) == len(proxyproto)) {
-			fmt.Println("[fromaddr] [toaddr] [proxyproto] len must be equal")
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-
-		for i := range proxyproto {
-			if len(fromaddr[i]) == 0 || len(servers) == 0 || len(toaddr[i]) == 0 {
-				fmt.Println("[proxy_client] or [reverse_proxy_client] need [server] [fromaddr] [toaddr] [proxyproto]")
-				fmt.Println()
-				flag.Usage()
-				return
-			}
-		}
-
-		if len(protos) == 0 {
-			protos = append(protos, "tcp")
-		}
-	}
-
-	if *t == "socks5_client" ||
-		*t == "reverse_socks5_client" ||
-		*t == "http_client" ||
-		*t == "reverse_http_client" {
-		if !(len(fromaddr) == len(proxyproto)) {
-			fmt.Println("[fromaddr] [proxyproto] len must be equal")
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-
-		for i := range proxyproto {
-			if len(fromaddr[i]) == 0 || len(servers) == 0 {
-				fmt.Println("[socks5_client] or [reverse_socks5_client] or [http_client] or [reverse_http_client] need [server] [fromaddr] [proxyproto]")
-				fmt.Println()
-				flag.Usage()
-				return
-			}
-		}
-
-		if len(protos) == 0 {
-			protos = append(protos, "tcp")
-		}
-	}
-
-	if *t == "server" {
-		if len(listenaddrs) != len(protos) {
-			fmt.Println("[proto] [listen] len must be equal")
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-	} else {
-		if len(protos) != 1 {
-			fmt.Println("client takes exactly one [proto]; multi-path is not supported (run multiple clients instead)")
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-		if len(servers) != 1 {
-			fmt.Println("client takes exactly one [server]")
-			fmt.Println()
-			flag.Usage()
-			return
-		}
-	}
+	protos = protoFlags(normalizedProtos)
 
 	logprefix := "server"
 	if *t != "server" {
