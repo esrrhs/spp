@@ -2,15 +2,18 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"os"
 	"os/exec"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -127,6 +130,48 @@ func selectedUnderlays() []string {
 		return []string{v}
 	}
 	return matrixUnderlays
+}
+
+// matrixParallel caps how many FullMatrix proxy pairs run at once across *all*
+// mode/underlay/codec leaves. Every leaf calls t.Parallel, so the only default
+// bound is `go test -parallel` (= GOMAXPROCS): a high-core developer box would
+// otherwise launch far more crypto+compress pairs than CI's 4-vCPU runners,
+// oversubscribing localhost and pushing an unlucky first echo past its deadline
+// (the matrix flakes with ~30s read i/o timeouts on 8+ core machines). Clamp to
+// 4 to match CI; SPP_MATRIX_PARALLEL overrides for local tuning.
+func matrixParallel() int {
+	if v := strings.TrimSpace(os.Getenv("SPP_MATRIX_PARALLEL")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	if p := runtime.GOMAXPROCS(0); p < 4 {
+		return p
+	}
+	return 4
+}
+
+// matrixGlobalSlots bounds total in-flight matrix pairs; matrixRicmpSlots keeps
+// the host-scoped ICMP demux serial even while several pairs share the cap.
+var (
+	matrixGlobalSlots = make(chan struct{}, matrixParallel())
+	matrixRicmpSlots  = make(chan struct{}, 1)
+)
+
+// acquireMatrixSlot takes the process-wide matrix concurrency slot and, for
+// ricmp, an extra host-scoped serial slot. Callers must defer releaseMatrixSlot.
+func acquireMatrixSlot(proto string) {
+	matrixGlobalSlots <- struct{}{}
+	if underlayMayNeedRoot(proto) {
+		matrixRicmpSlots <- struct{}{}
+	}
+}
+
+func releaseMatrixSlot(proto string) {
+	if underlayMayNeedRoot(proto) {
+		<-matrixRicmpSlots
+	}
+	<-matrixGlobalSlots
 }
 
 func startModeProxy(t *testing.T, mode, proto string, cfg *Config) *e2eHarness {
@@ -248,7 +293,62 @@ func startProxyMode(t *testing.T, proto string, cfg *Config, mode string, extraS
 		t.Fatalf("wait %s %s/%s: %v", waitAddr, mode, proto, err)
 	}
 	conn.Close()
+
+	// In REVERSE_PROXY the server starts accepting on the exposed port and relays
+	// OPEN before the client has processed LOGINRSP and built its outputer
+	// (iniService runs before LOGINRSP is sent). An OPEN landing in that window is
+	// dropped, leaving that conn half-open until it times out. A bare connect probe
+	// therefore is not enough readiness: warm the tunnel end-to-end on throwaway
+	// conns so the test's real connection cannot land in the startup window.
+	if mode == "REVERSE_PROXY" {
+		warmupReverseEcho(t, h)
+	}
 	return h
+}
+
+// tryEcho performs one exact echo round trip on conn and returns any error
+// instead of failing the test, so callers can retry during startup warmup.
+func tryEcho(conn net.Conn, payload []byte, timeout time.Duration) error {
+	_ = conn.SetDeadline(time.Now().Add(timeout))
+	if _, err := conn.Write(payload); err != nil {
+		return err
+	}
+	got := make([]byte, len(payload))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		return err
+	}
+	if !bytes.Equal(got, payload) {
+		return errors.New("warm echo payload mismatch")
+	}
+	return nil
+}
+
+// warmupReverseEcho dials fresh throwaway conns until one completes a full echo,
+// proving both sides' services are up and routing works. It fails the test only
+// if the tunnel never becomes warm within a generous bound.
+func warmupReverseEcho(t *testing.T, h *e2eHarness) {
+	t.Helper()
+	payload := []byte("spp-warmup")
+	deadline := time.Now().Add(20 * time.Second)
+	var lastErr error
+	for time.Now().Before(deadline) {
+		conn, err := waitForPort(h.clientAddr, 2*time.Second)
+		if err != nil {
+			lastErr = err
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		if err := tryEcho(conn, payload, 3*time.Second); err != nil {
+			lastErr = err
+			conn.Close()
+			time.Sleep(20 * time.Millisecond)
+			continue
+		}
+		conn.Close()
+		return
+	}
+	h.Close()
+	t.Fatalf("reverse tunnel (%s) never warmed end-to-end: %v", h.proto, lastErr)
 }
 
 func (h *e2eHarness) Close() {
