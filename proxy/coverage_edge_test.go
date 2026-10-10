@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -198,4 +199,74 @@ func TestProcessDispatch_UnknownIdsAreNoop(t *testing.T) {
 	h.server.processClose(&ProxyFrame{CloseFrame: &CloseFrame{Id: missing}}, serverSess)
 	h.server.processOpenRsp(&ProxyFrame{OpenRspFrame: &OpenConnRspFrame{Id: missing}}, serverSess)
 	h.server.processOpen(&ProxyFrame{OpenFrame: &OpenConnFrame{Id: missing, ServiceIndex: 99}}, serverSess)
+}
+
+// ---- FullMatrix global concurrency gate -----------------------------------
+
+func TestMatrixParallel(t *testing.T) {
+	orig := runtime.GOMAXPROCS(0)
+	t.Cleanup(func() { runtime.GOMAXPROCS(orig) })
+
+	cases := []struct {
+		name   string
+		procs  int
+		env    string
+		hasEnv bool
+		want   int
+	}{
+		{"clamps high-core box to CI ceiling", 8, "", false, 4},
+		{"exactly four stays four", 4, "", false, 4},
+		{"follows smaller gomaxprocs", 2, "", false, 2},
+		{"positive env override wins", 8, "3", true, 3},
+		{"env override above procs still honored", 2, "6", true, 6},
+		{"zero env falls back to clamp", 8, "0", true, 4},
+		{"negative env falls back to clamp", 8, "-2", true, 4},
+		{"garbage env falls back to clamp", 8, "abc", true, 4},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			runtime.GOMAXPROCS(tc.procs)
+			if tc.hasEnv {
+				t.Setenv("SPP_MATRIX_PARALLEL", tc.env)
+			} else {
+				t.Setenv("SPP_MATRIX_PARALLEL", "")
+			}
+			if got := matrixParallel(); got != tc.want {
+				t.Fatalf("matrixParallel procs=%d env=%q = %d, want %d", tc.procs, tc.env, got, tc.want)
+			}
+		})
+	}
+}
+
+// acquire/release must keep the global gate usable and, for ricmp, serialize
+// through the host-scoped slot without leaking either token.
+func TestMatrixSlots_AcquireRelease(t *testing.T) {
+	for i := 0; i < cap(matrixGlobalSlots)*2; i++ {
+		acquireMatrixSlot("tcp")
+		releaseMatrixSlot("tcp")
+	}
+	// ricmp takes both tokens but releases in reverse order; repeat to ensure no
+	// token is leaked (a leak would deadlock the second full-capacity round).
+	for round := 0; round < 2; round++ {
+		acquireMatrixSlot("ricmp")
+		// Holding the single ricmp slot, a second acquire must block.
+		got := make(chan struct{})
+		go func() {
+			acquireMatrixSlot("ricmp")
+			releaseMatrixSlot("ricmp")
+			close(got)
+		}()
+		select {
+		case <-got:
+			t.Fatal("ricmp slot must be serial: second acquire succeeded while held")
+		case <-time.After(20 * time.Millisecond):
+		}
+		releaseMatrixSlot("ricmp")
+		select {
+		case <-got:
+		case <-time.After(time.Second):
+			t.Fatal("queued ricmp acquire did not proceed after release")
+		}
+	}
 }
