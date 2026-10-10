@@ -29,19 +29,15 @@ func TestE2E_FullMatrix(t *testing.T) {
 				proto := proto
 				t.Run(proto, func(t *testing.T) {
 					skipIfUnderlayUnavailable(t, proto)
-					// ricmp demux is host-scoped; keep it serial within the shard.
-					limit := 4
-					if proto == "ricmp" {
-						limit = 1
-					}
-					sem := make(chan struct{}, limit)
 
 					for _, codec := range codecs {
 						codec := codec
 						t.Run(codec.name, func(t *testing.T) {
 							t.Parallel()
-							sem <- struct{}{}
-							defer func() { <-sem }()
+							// Bound matrix-wide pair concurrency (see matrixParallel);
+							// ricmp additionally takes a host-scoped serial slot.
+							acquireMatrixSlot(proto)
+							defer releaseMatrixSlot(proto)
 
 							key := fmt.Sprintf("full-matrix-%s-%s-%s-secret", mode, proto, strings.ReplaceAll(codec.name, "/", "-"))
 							cfg := withCodec(testConfig(key), codec.compress, codec.encrypt, codec.encKey)
