@@ -152,6 +152,12 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) {
 		return
 	}
 
+	// Bound request-line/header reading: the conn is not in i.sonny yet, so a
+	// client that connects and stalls mid-request would otherwise hold a
+	// goroutine and fd forever.
+	cancelHandshake := handshakeWatchdog(proxyConn, localHandshakeTimeout(i.config))
+	defer cancelHandshake()
+
 	br := bufio.NewReader(proxyConn.conn)
 
 	reqLine, err := br.ReadString('\n')
@@ -219,6 +225,10 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) {
 		proxyConn.closeConn()
 		return
 	}
+
+	// Request complete and authorized: release the handshake budget before the
+	// reply/tunnel phase (liveness is handled by checkSonnyActive afterwards).
+	cancelHandshake()
 
 	if method == "CONNECT" {
 		targetAddr := parseHost(rawURI, "443")
