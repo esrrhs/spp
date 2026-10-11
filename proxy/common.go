@@ -149,6 +149,43 @@ func (p *ProxyConn) closeConn() {
 	})
 }
 
+// localHandshakeTimeout is the budget a peer connected to a local proxy
+// listener (SOCKS5/HTTP) has to finish its handshake. It reuses the main
+// channel's auth budget; fall back to the established timeout when unset.
+func localHandshakeTimeout(cfg *Config) time.Duration {
+	secs := cfg.AuthTimeout
+	if secs <= 0 {
+		secs = cfg.EstablishedTimeout
+	}
+	return time.Duration(secs) * time.Second
+}
+
+// handshakeWatchdog bounds a local proxy listener (SOCKS5/HTTP) handshake.
+// Handshaking conns are not registered in Inputer.sonny yet, so neither
+// MaxSonny nor checkSonnyActive can bound them; a peer that connects and
+// stays silent, or sends only half a request (slowloris / scanner), would
+// otherwise pin a goroutine and an fd forever. network.Conn does not expose
+// socket deadlines, so the watchdog closes the conn itself, unblocking the
+// handshake Read with an error. The returned cancel is idempotent: call it
+// as soon as the handshake has completed (deferring it is also safe).
+func handshakeWatchdog(p *ProxyConn, timeout time.Duration) func() {
+	if timeout <= 0 {
+		return func() {}
+	}
+	var fired atomic.Bool
+	t := time.AfterFunc(timeout, func() {
+		if fired.CompareAndSwap(false, true) {
+			loggo.Warn("local proxy handshake timeout, closing %s", p.Info())
+			p.closeConn()
+		}
+	})
+	return func() {
+		if fired.CompareAndSwap(false, true) {
+			t.Stop()
+		}
+	}
+}
+
 func (p *ProxyConn) setEstablished(v bool) {
 	if v {
 		atomic.StoreInt32(&p.established, 1)

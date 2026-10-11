@@ -500,3 +500,78 @@ func TestE2E_KcpFecEnabled(t *testing.T) {
 	defer conn.Close()
 	echoAndHash(t, conn, payload, 60*time.Second)
 }
+
+// assertIdleConnClosedByServer connects to a local proxy listener, optionally
+// sends a partial handshake, and then goes silent. The server must close the
+// conn on its own (handshake watchdog): a read error caused by OUR OWN deadline
+// is distinguished from a server-side close and fails the assertion.
+func assertIdleConnClosedByServer(t *testing.T, addr, label string, preSend []byte) {
+	t.Helper()
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("%s: dial: %v", label, err)
+	}
+	defer conn.Close()
+
+	if len(preSend) > 0 {
+		if _, err := conn.Write(preSend); err != nil {
+			t.Fatalf("%s: pre-send: %v", label, err)
+		}
+	}
+
+	const testBudget = 6 * time.Second
+	_ = conn.SetDeadline(time.Now().Add(testBudget))
+	start := time.Now()
+	_, rerr := conn.Read(make([]byte, 1))
+	elapsed := time.Since(start)
+	if rerr == nil {
+		t.Fatalf("%s: idle conn was not closed", label)
+	}
+	if ne, ok := rerr.(net.Error); ok && ne.Timeout() {
+		t.Fatalf("%s: hit our own %v read deadline — server never closed the stalled conn: %v",
+			label, testBudget, rerr)
+	}
+	if elapsed > testBudget-time.Second {
+		t.Fatalf("%s: close took too long (%v) — watchdog not bounded", label, elapsed)
+	}
+	t.Logf("%s: server closed stalled conn after %v (%v)", label, elapsed.Round(time.Millisecond), rerr)
+}
+
+// TestE2E_Lifecycle_Socks5IdleHandshakeClosed pins the local SOCKS5 handshake
+// watchdog: stalled conns are not registered sonny yet, so without the timeout
+// they pin a goroutine+fd forever (slowloris). A valid handshake after a
+// watchdog sweep must still work.
+func TestE2E_Lifecycle_Socks5IdleHandshakeClosed(t *testing.T) {
+	cfg := testConfig("socks5-idle-handshake-secret")
+	cfg.AuthTimeout = 1
+	h := startSocks5Proxy(t, "tcp", cfg)
+	defer h.Close()
+
+	// Peer sends nothing at all.
+	assertIdleConnClosedByServer(t, h.clientAddr, "socks5/no-bytes", nil)
+	// Peer sends only the greeting VER and stalls mid-handshake.
+	assertIdleConnClosedByServer(t, h.clientAddr, "socks5/partial-greeting", []byte{0x05})
+
+	// Watchdog must not kill a healthy, fully-handshaked session.
+	conn := socks5Connect(t, h.clientAddr, h.echoAddr, 5*time.Second)
+	defer conn.Close()
+	echoRoundTrip(t, conn, []byte("post-watchdog-socks5"), 10*time.Second)
+}
+
+// TestE2E_Lifecycle_HTTPIdleHandshakeClosed is the HTTP-inputer counterpart:
+// silence and half-written request lines are bounded; an authorized CONNECT
+// after the sweep still proxies.
+func TestE2E_Lifecycle_HTTPIdleHandshakeClosed(t *testing.T) {
+	cfg := testConfig("http-idle-handshake-secret")
+	cfg.AuthTimeout = 1
+	h := startHTTPProxy(t, "tcp", cfg)
+	defer h.Close()
+
+	assertIdleConnClosedByServer(t, h.clientAddr, "http/no-bytes", nil)
+	assertIdleConnClosedByServer(t, h.clientAddr, "http/partial-request",
+		[]byte("CONNECT example.com:4"))
+
+	conn := httpConnect(t, h.clientAddr, h.echoAddr, "", "", 5*time.Second)
+	defer conn.Close()
+	echoRoundTrip(t, conn, []byte("post-watchdog-http"), 10*time.Second)
+}
