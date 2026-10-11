@@ -74,6 +74,22 @@ func waitForPort(addr string, timeout time.Duration) (net.Conn, error) {
 	return nil, fmt.Errorf("timeout waiting for %s", addr)
 }
 
+// waitForPortClosed polls until dials to addr are refused, i.e. no listener
+// remains bound. Inputer.Close shuts its listener asynchronously.
+func waitForPortClosed(t *testing.T, addr string, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		conn, err := net.DialTimeout("tcp", addr, 100*time.Millisecond)
+		if err != nil {
+			return
+		}
+		conn.Close()
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("port %s still accepting after %v", addr, timeout)
+}
+
 func TestE2E_TCP_ForwardProxy(t *testing.T) {
 	echoAddr, stopEcho := startTCPEchoServer(t)
 	defer stopEcho()
