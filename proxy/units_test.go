@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -592,6 +594,70 @@ func mustPopLoginRsp(t *testing.T, q *prioQueue) *LoginRspFrame {
 		t.Fatalf("expected LOGINRSP, got %v", f.Type)
 	}
 	return f.LoginRspFrame
+}
+
+// TestServer_ReverseLogin_RspQueuedBeforeOpen pins the startup ordering that
+// closes the reverse-proxy race: the ok LOGINRSP must be the first frame on the
+// session send queue even though the reverse inputer starts listening (and may
+// immediately relay an OPEN) right after, because processLogin enqueues
+// LOGINRSP before iniService and same-prio frames drain strictly FIFO.
+func TestServer_ReverseLogin_RspQueuedBeforeOpen(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "unit-reverse-order"
+	s := startUnitTestServer(t, cfg)
+
+	sess := newTestClientConn(cfg)
+	fromAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	ch, err := makeAuthChallenge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.authChallenge = ch
+	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
+		Name:       "unit-reverse",
+		Clienttype: CLIENT_TYPE_REVERSE_PROXY,
+		AuthProof:  computeAuthProof(cfg.Key, ch),
+		Services: []*LoginService{{
+			Proxyproto: PROXY_PROTO_TCP,
+			Fromaddr:   fromAddr,
+			Toaddr:     "127.0.0.1:1",
+		}},
+	}}, sess)
+	t.Cleanup(sess.closeServices)
+
+	if !sess.isEstablished() {
+		t.Fatal("reverse session must be established")
+	}
+
+	// Frame 1: LOGINRSP — enqueued before the inputer even existed.
+	v, closed, ok := sess.sendq.PopWait(3 * time.Second)
+	if !ok || closed {
+		t.Fatalf("LOGINRSP missing: ok=%v closed=%v", ok, closed)
+	}
+	rf := v.(*ProxyFrame)
+	if rf.Type != FRAME_TYPE_LOGINRSP || !rf.LoginRspFrame.Ret {
+		t.Fatalf("first frame must be ok LOGINRSP, got %v", rf.Type)
+	}
+
+	// Frame 2: a conn to the now-listening exposed port relays OPEN, and it is
+	// strictly behind LOGINRSP.
+	conn, err := net.DialTimeout("tcp", fromAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial exposed reverse port: %v", err)
+	}
+	defer conn.Close()
+
+	v, closed, ok = sess.sendq.PopWait(3 * time.Second)
+	if !ok || closed {
+		t.Fatalf("OPEN missing: ok=%v closed=%v", ok, closed)
+	}
+	of := v.(*ProxyFrame)
+	if of.Type != FRAME_TYPE_OPEN || of.OpenFrame == nil {
+		t.Fatalf("second frame must be OPEN, got %v", of.Type)
+	}
+	if of.OpenFrame.ServiceIndex != 0 {
+		t.Fatalf("OPEN service_index=%d, want 0", of.OpenFrame.ServiceIndex)
+	}
 }
 
 // ---- routing edge cases -----------------------------------------------------

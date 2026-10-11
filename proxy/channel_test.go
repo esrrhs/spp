@@ -7,6 +7,26 @@ import (
 	"time"
 )
 
+func TestPrioQueue_SamePrioFIFO(t *testing.T) {
+	// The reverse-proxy startup fix relies on this contract: LOGINRSP and a
+	// relayed OPEN both enter sendq as prioControl, so a LOGINRSP enqueued
+	// before services start must reach the wire before any later OPEN.
+	q := newPrioQueue(8)
+	const n = 32
+	for i := 0; i < n; i++ {
+		q.Push(i, prioControl)
+	}
+	for i := 0; i < n; i++ {
+		v, closed, ok := q.PopWait(time.Second)
+		if !ok || closed {
+			t.Fatalf("pop %d: ok=%v closed=%v", i, ok, closed)
+		}
+		if v.(int) != i {
+			t.Fatalf("same-prio FIFO broken at %d: got %v", i, v)
+		}
+	}
+}
+
 func TestPrioQueueControlJumpsAhead(t *testing.T) {
 	q := newPrioQueue(8)
 	q.Push("bulk1", prioBulk)
