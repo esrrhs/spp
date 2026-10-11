@@ -177,6 +177,16 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 			if loaded {
 				tun = val.(*socks5UDPTunnel)
 			} else {
+				// A single UDP association can fan out to unlimited distinct
+				// destinations, and each tunnel registers its own sonny entry
+				// (channels + goroutines + an upstream OPEN). Without this
+				// check the TCP listener's MaxSonny gate — which counts only
+				// accepted control conns — would be fully bypassed. Share the
+				// same budget as TCP sonny conns and drop excess datagrams.
+				if size := i.sonnySize(); size >= i.config.MaxSonny {
+					loggo.Info("socks5UDP max sonny, drop datagram to %s %d", target, size)
+					continue
+				}
 				sonny := &ProxyConn{
 					id:   common.UniqueId(),
 					conn: nil, // remote virtual UDP conn handled via sonny channels
