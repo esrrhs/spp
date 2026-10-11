@@ -351,10 +351,24 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 	sess.name = f.LoginFrame.Name
 	sess.clientID = atomic.AddUint64(&s.nextClientID, 1)
 
+	rf.LoginRspFrame.Ret = true
+	rf.LoginRspFrame.Msg = "ok"
+	rf.LoginRspFrame.CompressType = agreeC
+	rf.LoginRspFrame.EncryptType = agreeE
+	rf.LoginRspFrame.SessionId = sess.clientID
+	// Queue LOGINRSP BEFORE starting services. SendFrame only enqueues and the
+	// wire writer drains sendq with strict FIFO inside the prioControl bucket,
+	// so the client is guaranteed to process LOGINRSP — and synchronously build
+	// its outputer in processLoginRsp — before any OPEN relayed by an inputer
+	// started just below. With iniService first, an OPEN accepted in that
+	// startup window overtook LOGINRSP and the client dropped it silently in
+	// routeOpenToOutput, leaving the reverse-proxy conn half-open until timeout.
+	sess.SendFrame(rf)
+
 	if err := s.iniService(s.wg, f, sess); err != nil {
-		rf.LoginRspFrame.Ret = false
-		rf.LoginRspFrame.Msg = "iniService fail"
-		sess.SendFrame(rf)
+		// The ok LOGINRSP may already be on the wire: drop the session so the
+		// client reconnects instead of serving against half-started services.
+		sess.setNeedClose()
 		loggo.Error("processLogin iniService fail %s name=%s %s", sess.conn.Info(), sess.name, err)
 		return
 	}
@@ -362,13 +376,6 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 	s.clients.Store(sess.clientID, sess)
 	atomic.AddInt32(&s.clientNum, 1)
 	sess.setEstablished(true)
-
-	rf.LoginRspFrame.Ret = true
-	rf.LoginRspFrame.Msg = "ok"
-	rf.LoginRspFrame.CompressType = agreeC
-	rf.LoginRspFrame.EncryptType = agreeE
-	rf.LoginRspFrame.SessionId = sess.clientID
-	sess.SendFrame(rf)
 
 	loggo.Info("processLogin ok %s name=%s session=%d services=%d compress=%s encrypt=%s",
 		sess.conn.Info(), sess.name, sess.clientID, len(loginServicesOf(f.LoginFrame)),
