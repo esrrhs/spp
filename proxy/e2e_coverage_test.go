@@ -7,11 +7,14 @@ import (
 	"net"
 	"os"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/esrrhs/gohome/network"
 )
 
 // Full mode × underlay × codec cartesian.
@@ -574,4 +577,159 @@ func TestE2E_Lifecycle_HTTPIdleHandshakeClosed(t *testing.T) {
 	conn := httpConnect(t, h.clientAddr, h.echoAddr, "", "", 5*time.Second)
 	defer conn.Close()
 	echoRoundTrip(t, conn, []byte("post-watchdog-http"), 10*time.Second)
+}
+
+// startReverseSocks5Pair boots a tunnel server and a REVERSE_SOCKS5 client:
+// the client asks the server to expose a SOCKS5 listener at exposeAddr, and
+// CONNECT requests arriving there are dialed out from the client side. The
+// returned echoAddr is reachable "inside" the client network.
+func startReverseSocks5Pair(t *testing.T, cfg *Config) (echoAddr, exposeAddr string) {
+	t.Helper()
+	var stopEcho func()
+	echoAddr, stopEcho = startTCPEchoServer(t)
+	t.Cleanup(stopEcho)
+
+	serverAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	exposeAddr = fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+
+	server, err := NewServer(cfg, []string{"tcp"}, []string{serverAddr})
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	t.Cleanup(server.Close)
+
+	client, err := NewClient(cfg, "tcp", serverAddr, "e2e_reverse_socks5",
+		"REVERSE_SOCKS5", []string{"tcp"}, []string{exposeAddr}, nil)
+	if err != nil {
+		t.Fatalf("NewClient REVERSE_SOCKS5: %v", err)
+	}
+	t.Cleanup(client.Close)
+
+	probe, err := waitForPort(exposeAddr, 15*time.Second)
+	if err != nil {
+		t.Fatalf("wait reverse socks5 expose addr %s: %v", exposeAddr, err)
+	}
+	probe.Close()
+	return echoAddr, exposeAddr
+}
+
+// socks5ConnectAuth dials a SOCKS5 proxy, performs RFC 1928 method negotiation
+// plus RFC 1929 username/password authentication (empty creds = no-auth), then
+// a CONNECT to targetAddr. The returned stream carries application data.
+func socks5ConnectAuth(t *testing.T, proxyAddr, targetAddr, user, pass string, timeout time.Duration) net.Conn {
+	t.Helper()
+	raw, err := net.DialTimeout("tcp", proxyAddr, timeout)
+	if err != nil {
+		t.Fatalf("socks5 dial: %v", err)
+	}
+	tcpConn := raw.(*net.TCPConn)
+	ms := int(timeout / time.Millisecond)
+	if err := network.Sock5Handshake(tcpConn, ms, user, pass); err != nil {
+		tcpConn.Close()
+		t.Fatalf("socks5 handshake: %v", err)
+	}
+	host, portStr, err := net.SplitHostPort(targetAddr)
+	if err != nil {
+		tcpConn.Close()
+		t.Fatalf("split target addr: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		tcpConn.Close()
+		t.Fatalf("target port: %v", err)
+	}
+	if err := network.Sock5SetRequest(tcpConn, host, port, ms); err != nil {
+		tcpConn.Close()
+		t.Fatalf("socks5 connect request: %v", err)
+	}
+	return tcpConn
+}
+
+// TestE2E_ReverseSOCKS5_Connect covers the previously untested REVERSE_SOCKS5
+// mode: a SOCKS5 listener exposed on the SERVER side tunnels CONNECT requests
+// to destinations reachable only from the client side. Two sequential sonny
+// conns also prove the exposed listener keeps serving over one tunnel.
+func TestE2E_ReverseSOCKS5_Connect(t *testing.T) {
+	cfg := testConfig("reverse-socks5-connect-secret")
+	echoAddr, exposeAddr := startReverseSocks5Pair(t, cfg)
+
+	for i := 0; i < 2; i++ {
+		conn := socks5Connect(t, exposeAddr, echoAddr, 10*time.Second)
+		payload := []byte(fmt.Sprintf("reverse-socks5-connect-%d", i))
+		echoRoundTrip(t, conn, payload, 10*time.Second)
+		conn.Close()
+	}
+}
+
+// TestE2E_Lifecycle_ReverseSOCKS5IdleHandshakeClosed verifies the handshake
+// watchdog on the SERVER-exposed reverse SOCKS5 listener (the public-internet
+// attack surface): a stalled peer is dropped at AuthTimeout; healthy traffic
+// afterwards still flows through the same tunnel.
+func TestE2E_Lifecycle_ReverseSOCKS5IdleHandshakeClosed(t *testing.T) {
+	cfg := testConfig("reverse-socks5-idle-secret")
+	cfg.AuthTimeout = 1
+	echoAddr, exposeAddr := startReverseSocks5Pair(t, cfg)
+
+	assertIdleConnClosedByServer(t, exposeAddr, "reverse-socks5/no-bytes", nil)
+	assertIdleConnClosedByServer(t, exposeAddr, "reverse-socks5/partial-greeting", []byte{0x05})
+
+	conn := socks5Connect(t, exposeAddr, echoAddr, 5*time.Second)
+	defer conn.Close()
+	echoRoundTrip(t, conn, []byte("post-watchdog-reverse-socks5"), 10*time.Second)
+}
+
+// TestE2E_SOCKS5_ConnectUserPassAuth covers RFC 1929 username/password auth on
+// the SOCKS5 TCP CONNECT path (previously only UDP ASSOCIATE had auth e2e):
+// valid creds proxy data, wrong creds are rejected and the conn closes, a
+// no-auth-only client gets X'FF', and the listener stays healthy afterwards.
+func TestE2E_SOCKS5_ConnectUserPassAuth(t *testing.T) {
+	cfg := testConfig("socks5-connect-auth-secret")
+	cfg.Username = "sppuser"
+	cfg.Password = "spppass"
+	h := startSocks5Proxy(t, "tcp", cfg)
+	defer h.Close()
+
+	// 1. Valid credentials: full handshake + CONNECT + echo.
+	good := socks5ConnectAuth(t, h.clientAddr, h.echoAddr, cfg.Username, cfg.Password, 5*time.Second)
+	echoRoundTrip(t, good, []byte("auth-connect-ok"), 10*time.Second)
+	good.Close()
+
+	// 2. Wrong password: gohome client surfaces the RFC 1929 failure status;
+	// the server must then close the conn rather than keep it around.
+	raw, err := net.DialTimeout("tcp", h.clientAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial for bad-auth: %v", err)
+	}
+	if err := network.Sock5Handshake(raw.(*net.TCPConn), 3000, cfg.Username, "wrong-password"); err == nil {
+		raw.Close()
+		t.Fatal("expected RFC1929 auth failure for wrong password")
+	}
+	_ = raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, rerr := raw.Read(make([]byte, 1)); rerr == nil {
+		t.Fatal("server kept conn open after failed auth")
+	}
+	raw.Close()
+
+	// 3. Client offering only NO-AUTH against an auth-required proxy must
+	// receive method selection X'FF' (no acceptable methods).
+	noAuth, err := net.DialTimeout("tcp", h.clientAddr, 3*time.Second)
+	if err != nil {
+		t.Fatalf("dial for no-auth offer: %v", err)
+	}
+	if _, err := noAuth.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+		t.Fatalf("greeting write: %v", err)
+	}
+	sel := make([]byte, 2)
+	if _, err := io.ReadFull(noAuth, sel); err != nil {
+		t.Fatalf("method selection read: %v", err)
+	}
+	if sel[0] != 0x05 || sel[1] != 0xFF {
+		t.Fatalf("want method selection {0x05, 0xFF}, got %v", sel)
+	}
+	noAuth.Close()
+
+	// 4. Rejected attempts must not disturb the listener.
+	after := socks5ConnectAuth(t, h.clientAddr, h.echoAddr, cfg.Username, cfg.Password, 5*time.Second)
+	defer after.Close()
+	echoRoundTrip(t, after, []byte("auth-still-ok"), 10*time.Second)
 }
