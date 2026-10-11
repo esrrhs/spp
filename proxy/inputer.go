@@ -228,6 +228,11 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) {
 		return
 	}
 
+	// Bound the handshake: this conn is not in i.sonny yet, so nothing else
+	// would ever close it if the peer goes silent mid-handshake.
+	cancelHandshake := handshakeWatchdog(proxyConn, localHandshakeTimeout(i.config))
+	defer cancelHandshake()
+
 	var reqCmd byte
 	var targetAddr string
 	var handshakeErr error
@@ -262,6 +267,11 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) {
 		proxyConn.closeConn()
 		return
 	}
+
+	// Handshake complete: the data phase has its own liveness guard
+	// (checkSonnyActive) and, for UDP ASSOCIATE, must block until the TCP
+	// control conn closes.
+	cancelHandshake()
 
 	if reqCmd == network.Socks5CmdUDPAssociate {
 		loggo.Info("processSocks5Conn UDP ASSOCIATE %s", proxyConn.conn.Info())
