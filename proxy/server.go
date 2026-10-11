@@ -186,15 +186,7 @@ func (s *Server) serveConn(sess *ClientConn) {
 
 	wg := thread.NewGroup("Server serveConn"+" "+sess.conn.Info(), s.wg, func() {
 		loggo.Info("conn group exit %s", sess.conn.Info())
-		// clientID 0 means login never completed: nothing is in the map.
-		if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
-			atomic.AddInt32(&s.clientNum, -1)
-			sess.closeServices()
-		}
-		sess.setEstablished(false)
-		sess.closeConn()
-		sess.bizq.Close()
-		sess.CloseChannels()
+		s.cleanupClientConn(sess)
 	})
 
 	var pingflag int32
@@ -242,6 +234,29 @@ func (s *Server) serveConn(sess *ClientConn) {
 
 	wg.Wait()
 	loggo.Info("serveConn close %s", sess.conn.Info())
+}
+
+// cleanupClientConn tears down one accepted session. It runs from the conn
+// group's exit callback, so every teardown path (auth fail, ping timeout,
+// read error, iniService failure, parent shutdown) funnels through here.
+//
+// closeServices is unconditional on purpose: processLogin starts services —
+// reverse-proxy inputers bind exposed ports as listeners on the server root
+// group — BEFORE publishing the session in s.clients. If the conn dies in
+// that iniService→Store startup window the map lookup misses, and gating the
+// close on it would leak the listener: the exposed port stays held and every
+// client reconnect with the same fromaddr fails iniService until the server
+// restarts. The client counter is decremented only when this teardown owns
+// the map entry (a never-published session never incremented it).
+func (s *Server) cleanupClientConn(sess *ClientConn) {
+	if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
+		atomic.AddInt32(&s.clientNum, -1)
+	}
+	sess.closeServices()
+	sess.setEstablished(false)
+	sess.closeConn()
+	sess.bizq.Close()
+	sess.CloseChannels()
 }
 
 func (s *Server) sendAuthChallenge(sess *ClientConn) error {
