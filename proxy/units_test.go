@@ -660,6 +660,91 @@ func TestServer_ReverseLogin_RspQueuedBeforeOpen(t *testing.T) {
 	}
 }
 
+// ---- teardown: services must close even if the session was never published -
+
+// reverseLoginSession drives a REVERSE_PROXY login without any network: the
+// ok LOGINRSP is queued and a reverse inputer starts listening on fromAddr.
+func reverseLoginSession(t *testing.T, s *Server, cfg *Config, fromAddr string) *ClientConn {
+	t.Helper()
+	sess := newTestClientConn(cfg)
+	ch, err := makeAuthChallenge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.authChallenge = ch
+	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
+		Name:       "unit-cleanup",
+		Clienttype: CLIENT_TYPE_REVERSE_PROXY,
+		AuthProof:  computeAuthProof(cfg.Key, ch),
+		Services: []*LoginService{{
+			Proxyproto: PROXY_PROTO_TCP,
+			Fromaddr:   fromAddr,
+			Toaddr:     "127.0.0.1:1",
+		}},
+	}}, sess)
+	if !sess.isEstablished() {
+		t.Fatal("reverse session must be established")
+	}
+	return sess
+}
+
+// TestServer_CleanupClientConn_ClosesServices pins the login startup-window
+// teardown: processLogin starts services (a reverse inputer holding the
+// exposed port on the server root group) BEFORE publishing the session in
+// s.clients. A conn dying in that iniService→Store window must still release
+// the services, and cleanup must not drive the client counter negative.
+func TestServer_CleanupClientConn_ClosesServices(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "unit-cleanup-orphan-key"
+	s := startUnitTestServer(t, cfg)
+
+	// --- Phase A: conn group exits in the never-published window ---
+	from1 := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	sess1 := reverseLoginSession(t, s, cfg, from1)
+	probe, err := waitForPort(from1, 3*time.Second)
+	if err != nil {
+		t.Fatalf("reverse exposed port never listened: %v", err)
+	}
+	probe.Close()
+
+	// Reproduce the exact state of a conn that died between iniService and
+	// clients.Store: entry absent and the counter never incremented.
+	s.clients.Delete(sess1.clientID)
+	atomic.AddInt32(&s.clientNum, -1)
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("baseline clientSize=%d want 0", n)
+	}
+
+	s.cleanupClientConn(sess1)
+
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("cleanup of untracked session drove the counter to %d", n)
+	}
+	waitForPortClosed(t, from1, 3*time.Second)
+	// Teardown must be idempotent (exit callbacks can fire more than once).
+	s.cleanupClientConn(sess1)
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("double cleanup drove the counter to %d", n)
+	}
+
+	// --- Phase B: normal tracked teardown decrements and closes services ---
+	from2 := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	sess2 := reverseLoginSession(t, s, cfg, from2)
+	if _, err := waitForPort(from2, 3*time.Second); err != nil {
+		t.Fatalf("second reverse port never listened: %v", err)
+	}
+	if n := s.clientSize(); n != 1 {
+		t.Fatalf("clientSize=%d want 1", n)
+	}
+
+	s.cleanupClientConn(sess2)
+
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("tracked cleanup clientSize=%d want 0", n)
+	}
+	waitForPortClosed(t, from2, 3*time.Second)
+}
+
 // ---- routing edge cases -----------------------------------------------------
 
 func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
