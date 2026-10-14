@@ -111,10 +111,10 @@ func NewHttpInputer(wg *thread.Group, proto string, addr string, clienttype CLIE
 
 func (i *Inputer) listenHttp() {
 	loggo.Info("Inputer start listenHttp %s", i.addr)
-	for !isExit(i.fwg) {
+	for !isExit(i.fwg) && !i.closed.Load() {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
-			if isExit(i.fwg) {
+			if isExit(i.fwg) || i.closed.Load() {
 				break
 			}
 			// Transient Accept failures (EMFILE etc.) must not tear down the
@@ -124,19 +124,15 @@ func (i *Inputer) listenHttp() {
 			continue
 		}
 
-		size := i.sonnySize()
-		if size >= i.config.MaxSonny {
-			loggo.Info("Inputer listen max sonny %s %d", conn.Info(), size)
-			conn.Close()
-			continue
-		}
-
 		proxyconn := &ProxyConn{conn: conn}
-		goSafe(i.fwg, "Inputer processHttpConn "+conn.Info(), func() {
+		if !i.spawnSonny("Inputer processHttpConn "+conn.Info(), func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
 			i.processHttpConn(proxyconn)
-		})
+		}) {
+			proxyconn.closeConn()
+			continue
+		}
 	}
 	loggo.Info("Inputer end listenHttp %s", i.addr)
 }
@@ -244,9 +240,11 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) {
 		}
 
 		loggo.Debug("processHttpConn CONNECT ok %s -> %s", proxyConn.conn.Info(), targetAddr)
-		goSafe(i.fwg, "Inputer processProxyConn "+proxyConn.conn.Info(), func() {
+		if !i.spawnSonny("Inputer processProxyConn "+proxyConn.conn.Info(), func() {
 			i.processProxyConn(proxyConn, targetAddr)
-		})
+		}) {
+			proxyConn.closeConn()
+		}
 		return
 	}
 
@@ -292,7 +290,9 @@ func (i *Inputer) processHttpConn(proxyConn *ProxyConn) {
 	proxyConn.conn = newPrefixedConn(proxyConn.conn, prefixBuf.Bytes(), br)
 
 	loggo.Debug("processHttpConn HTTP ok %s -> %s", proxyConn.conn.Info(), targetAddr)
-	goSafe(i.fwg, "Inputer processProxyConn "+proxyConn.conn.Info(), func() {
+	if !i.spawnSonny("Inputer processProxyConn "+proxyConn.conn.Info(), func() {
 		i.processProxyConn(proxyConn, targetAddr)
-	})
+	}) {
+		proxyConn.closeConn()
+	}
 }

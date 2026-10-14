@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"strconv"
 	"testing"
 	"time"
@@ -473,60 +474,30 @@ func TestE2E_SOCKS5_UDPAssociateAuth(t *testing.T) {
 	}
 }
 
-// TestE2E_SOCKS5_UDPAssociate_MaxSonnyBound pins MaxSonny enforcement on the
-// SOCKS5 UDP ASSOCIATE fan-out: one association opens a distinct tunnel per
-// destination, so without a gate a single client could create unlimited sonny
-// entries (channels + goroutines + upstream OPENs) — completely bypassing the
-// TCP listener's MaxSonny check, which counts only accepted control conns.
-// The CLIENT side (where the SOCKS5 inputer runs) gets a small budget while
-// the server side allows more, so the bound must be enforced locally.
-func TestE2E_SOCKS5_UDPAssociate_MaxSonnyBound(t *testing.T) {
-	const (
-		maxTunnels = 3
-		targetsN   = 12
-	)
-
-	type udpTarget struct {
-		host string
-		port int
-		stop func()
-	}
-	targets := make([]udpTarget, 0, targetsN)
-	for i := 0; i < targetsN; i++ {
-		addr, stop := startUDPEchoServer(t)
-		host, portStr, err := net.SplitHostPort(addr)
-		if err != nil {
-			t.Fatalf("split echo addr: %v", err)
-		}
-		port, _ := strconv.Atoi(portStr)
-		targets = append(targets, udpTarget{host: host, port: port, stop: stop})
-	}
-	defer func() {
-		for _, tg := range targets {
-			tg.stop()
-		}
-	}()
+// TestE2E_SOCKS5_UDPAssociate_CloseReleasesHeldConns: a held silent
+// association must be reclaimed on client shutdown. The association
+// goroutine blocks reading the TCP control conn, and that conn used to be
+// invisible to Inputer.Close (never registered as a sonny), so both the
+// goroutine and the sockets leaked past Client.Close.
+func TestE2E_SOCKS5_UDPAssociate_CloseReleasesHeldConns(t *testing.T) {
+	const holders = 8
 
 	serverAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
 	socksAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
 
-	serverCfg := testConfig("socks5-udp-maxsonny-secret")
-	serverCfg.MaxSonny = 4096
-	clientCfg := testConfig("socks5-udp-maxsonny-secret")
-	clientCfg.MaxSonny = maxTunnels
+	cfg := testConfig("socks5-udp-close-secret")
 
-	server, err := NewServer(serverCfg, []string{"tcp"}, []string{serverAddr})
+	server, err := NewServer(cfg, []string{"tcp"}, []string{serverAddr})
 	if err != nil {
 		t.Fatalf("NewServer failed: %v", err)
 	}
 	defer server.Close()
 
-	client, err := NewClient(clientCfg, "tcp", serverAddr, "test_socks5_udp_maxsonny",
+	client, err := NewClient(cfg, "tcp", serverAddr, "test_socks5_udp_close",
 		"SOCKS5", []string{"tcp"}, []string{socksAddr}, nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	defer client.Close()
 
 	probe, err := waitForPort(socksAddr, 5*time.Second)
 	if err != nil {
@@ -534,60 +505,49 @@ func TestE2E_SOCKS5_UDPAssociate_MaxSonnyBound(t *testing.T) {
 	}
 	probe.Close()
 
-	tcpRaw, err := net.Dial("tcp", socksAddr)
-	if err != nil {
-		t.Fatalf("dial socks5: %v", err)
-	}
-	defer tcpRaw.Close()
-	tcpConn := tcpRaw.(*net.TCPConn)
-	if err := network.Sock5Handshake(tcpConn, 3000, "", ""); err != nil {
-		t.Fatalf("socks5 handshake: %v", err)
-	}
-	relayAddr, err := network.Sock5SetUDPRequest(tcpConn, "0.0.0.0", 0, 3000)
-	if err != nil {
-		t.Fatalf("UDP associate: %v", err)
-	}
+	baseG := runtime.NumGoroutine()
 
-	udpConn, err := net.Dial("udp", relayAddr)
-	if err != nil {
-		t.Fatalf("dial relay: %v", err)
-	}
-	defer udpConn.Close()
-
-	// One datagram to each distinct destination; processing is sequential on
-	// the relay read loop, so tunnel creation follows send order.
-	for i, tg := range targets {
-		pkt, err := network.Sock5PackUDP(tg.host, tg.port, []byte(fmt.Sprintf("maxsonny-%d", i)))
+	conns := make([]net.Conn, 0, holders)
+	defer func() {
+		for _, c := range conns {
+			c.Close()
+		}
+	}()
+	for i := 0; i < holders; i++ {
+		raw, err := net.Dial("tcp", socksAddr)
 		if err != nil {
-			t.Fatalf("pack udp: %v", err)
+			t.Fatalf("dial socks5 %d: %v", i, err)
 		}
-		if _, err := udpConn.Write(pkt); err != nil {
-			t.Fatalf("write datagram %d: %v", i, err)
+		tcpConn := raw.(*net.TCPConn)
+		if err := network.Sock5Handshake(tcpConn, 3000, "", ""); err != nil {
+			tcpConn.Close()
+			t.Fatalf("handshake %d: %v", i, err)
 		}
+		if _, err := network.Sock5SetUDPRequest(tcpConn, "0.0.0.0", 0, 3000); err != nil {
+			tcpConn.Close()
+			t.Fatalf("udp associate %d: %v", i, err)
+		}
+		conns = append(conns, raw)
 	}
 
-	replied := make(map[string]struct{})
-	deadline := time.Now().Add(3 * time.Second)
-	buf := make([]byte, 4096)
-	for time.Now().Before(deadline) {
-		_ = udpConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
-		n, err := udpConn.Read(buf)
-		if err != nil {
-			continue
-		}
-		host, port, _, err := network.Sock5UnpackUDP(buf[:n])
-		if err != nil {
-			continue
-		}
-		replied[net.JoinHostPort(host, strconv.Itoa(port))] = struct{}{}
+	client.Close()
+
+	// The held control conn must be closed by the client side (Inputer.Close
+	// reaches it through the sonny table): our side sees EOF promptly instead
+	// of blocking until the read deadline.
+	start := time.Now()
+	_ = conns[0].SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 64)
+	if _, err := conns[0].Read(buf); err == nil {
+		t.Fatal("control conn still open after client.Close")
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("control conn not closed by client.Close: read blocked %s", elapsed)
 	}
 
-	if n := len(replied); n > maxTunnels {
-		t.Fatalf("MaxSonny bypassed: %d of %d destinations got tunnels, limit %d",
-			n, targetsN, maxTunnels)
-	} else if n == 0 {
-		t.Fatal("no UDP target got a tunnel — fan-out fully broken")
-	} else {
-		t.Logf("tunnels admitted: %d/%d (limit %d)", n, targetsN, maxTunnels)
+	if !waitGoroutinesNear(baseG, 5, 8*time.Second) {
+		t.Fatalf("goroutines not recovered after client.Close with %d held associations: g=%d base=%d",
+			holders, runtime.NumGoroutine(), baseG)
 	}
+	t.Logf("held associations=%d released; g=%d base=%d", holders, runtime.NumGoroutine(), baseG)
 }

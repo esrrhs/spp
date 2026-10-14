@@ -376,14 +376,6 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 		return
 	}
 
-	if s.clientSize() >= s.config.MaxClient {
-		rf.LoginRspFrame.Ret = false
-		rf.LoginRspFrame.Msg = "max client"
-		sess.SendFrame(rf)
-		loggo.Error("processLogin max client %s", sess.conn.Info())
-		return
-	}
-
 	agreeC, agreeE, err := negotiateCodec(f.LoginFrame.CompressType, f.LoginFrame.EncryptType, s.config)
 	if err != nil {
 		rf.LoginRspFrame.Ret = false

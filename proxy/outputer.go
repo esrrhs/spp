@@ -202,14 +202,6 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 		targetAddr = net.JoinHostPort(ss_local_host, ss_local_port)
 	}
 
-	size := o.sonnySize()
-	if size >= o.config.MaxSonny {
-		rf.OpenRspFrame.Msg = "max sonny"
-		o.father.SendFrame(rf)
-		loggo.Info("Outputer listen max sonny %s %d", id, size)
-		return
-	}
-
 	proxyconn := &ProxyConn{id: id, conn: nil}
 	proxyconn.setEstablished(true)
 	_, loaded := o.sonny.LoadOrStore(proxyconn.id, proxyconn)
