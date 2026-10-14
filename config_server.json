@@ -13,7 +13,5 @@
   "compresstype": "zstd",
   "loglevel": "info",
   "nolog": 0,
-  "noprint": 0,
-  "maxclient": 10000,
-  "maxconn": 10240
+  "noprint": 0
 }

@@ -42,7 +42,7 @@ setsid "$BACKEND_BIN" -addr "127.0.0.1:${BACKEND_PORT}" -mode page -pagesize "$P
   </dev/null >"$LOG_DIR/backend.log" 2>&1 &
 echo $! >> "$OUT_DIR/pids"
 
-log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT maxconn=$MAXCONN"
+log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT"
 setsid "$SPP_BIN" \
   -type server \
   -listen ":${SERVER_PORT}" \
@@ -50,7 +50,6 @@ setsid "$SPP_BIN" \
   -key "$KEY" \
   -encrypt "$ENCRYPT" \
   -compress "$COMPRESS" \
-  -maxconn "$MAXCONN" \
   -noprint 1 -nolog 1 -loglevel error \
   -profile "$SERVER_PPROF" \
   </dev/null >"$LOG_DIR/server.log" 2>&1 &
@@ -66,7 +65,6 @@ setsid "$SPP_BIN" \
   -key "$KEY" \
   -encrypt "$ENCRYPT" \
   -compress "$COMPRESS" \
-  -maxconn "$MAXCONN" \
   -noprint 1 -nolog 1 -loglevel error \
   -profile "$CLIENT_PPROF" \
   </dev/null >"$LOG_DIR/client.log" 2>&1 &

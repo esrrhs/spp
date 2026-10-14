@@ -275,8 +275,6 @@ Then:
 | `loglevel` | string | `debug`, `info`, `warn`, `error` |
 | `nolog` | integer | `1` to disable writing log files, `0` to keep |
 | `noprint` | integer | `1` to suppress stdout logs, `0` to print |
-| `maxclient` | integer | Maximum concurrent client connections |
-| `maxconn` | integer | Maximum sub-connections |
 | `kcpfecdata` | integer | KCP FEC data shards (e.g. `10`); `0` disables FEC. Must match on both ends |
 | `kcpfecparity` | integer | KCP FEC parity shards (e.g. `3`); `0` disables FEC. `kcpfecdata` + `kcpfecparity` must not exceed 256 |
 | `statusaddr` | string | HTTP health/status listen address (e.g. `127.0.0.1:6060`); omit/empty disables |

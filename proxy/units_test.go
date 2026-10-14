@@ -173,24 +173,6 @@ func TestOutputer_SS_NoEnvRejected(t *testing.T) {
 	}
 }
 
-func TestOutputer_MaxSonnyRejected(t *testing.T) {
-	g := newTestGroup(t)
-	cfg := DefaultConfig()
-	cfg.MaxSonny = 0
-	o, err := NewOutputer(g, "tcp", CLIENT_TYPE_PROXY, cfg, newFatherWithQueue(8), 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	o.processOpenFrame(&ProxyFrame{
-		Type:      FRAME_TYPE_OPEN,
-		OpenFrame: &OpenConnFrame{Id: "c1", Toaddr: "127.0.0.1:1"},
-	})
-	rsp := popOpenRsp(t, o.father.sendq, time.Second)
-	if rsp.Ret || rsp.Msg != "max sonny" {
-		t.Fatalf("got ret=%v msg=%q", rsp.Ret, rsp.Msg)
-	}
-}
-
 func TestOutputer_DuplicateIDRejected(t *testing.T) {
 	g := newTestGroup(t)
 	o, err := NewOutputer(g, "tcp", CLIENT_TYPE_PROXY, DefaultConfig(), newFatherWithQueue(8), 0)
@@ -549,7 +531,7 @@ func TestServer_Login_StateMachine(t *testing.T) {
 	}
 }
 
-func TestServer_Login_AuthAndMaxClient(t *testing.T) {
+func TestServer_Login_AuthRejected(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Key = "unit-auth-key-2"
 	s := startUnitTestServer(t, cfg)
@@ -566,21 +548,6 @@ func TestServer_Login_AuthAndMaxClient(t *testing.T) {
 	}
 	if !sess.isNeedClose() {
 		t.Fatal("bad proof must mark conn needclose")
-	}
-
-	// MaxClient zero rejects new sessions.
-	s.config.MaxClient = 0
-	sess2 := newTestClientConn(cfg)
-	ch, _ := makeAuthChallenge()
-	sess2.authChallenge = ch
-	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
-		Clienttype: CLIENT_TYPE_PROXY,
-		AuthProof:  computeAuthProof(cfg.Key, ch),
-		Services:   []*LoginService{{Proxyproto: PROXY_PROTO_TCP}},
-	}}, sess2)
-	lr2 := mustPopLoginRsp(t, sess2.sendq)
-	if lr2.Ret || lr2.Msg != "max client" {
-		t.Fatalf("maxclient got ret=%v msg=%q", lr2.Ret, lr2.Msg)
 	}
 }
 
@@ -878,7 +845,7 @@ func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
 
 	g := newTestGroup(t)
 	cfg := DefaultConfig()
-	cfg.MaxSonny = 0 // makes dispatch return immediately with an OPENRSP
+	cfg.ConnectTimeout = 3
 	father := newFatherWithQueue(8)
 	o, err := NewOutputer(g, "tcp", CLIENT_TYPE_PROXY, cfg, father, 0)
 	if err != nil {
@@ -886,10 +853,14 @@ func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
 	}
 	// Out-of-range index is dropped.
 	routeOpenToOutput(&ProxyFrame{OpenFrame: &OpenConnFrame{Id: "x", ServiceIndex: 5}}, []*Outputer{o})
-	// Valid index dispatches and produces the "max sonny" response.
+	// Valid index dispatches; 127.0.0.1:1 is refused immediately, so the
+	// OPEN comes back as a failed OPENRSP without touching the network.
 	routeOpenToOutput(&ProxyFrame{OpenFrame: &OpenConnFrame{Id: "x", ServiceIndex: 0, Toaddr: "127.0.0.1:1"}}, []*Outputer{o})
-	rsp := popOpenRsp(t, father.sendq, time.Second)
-	if rsp.Ret || rsp.Msg != "max sonny" {
-		t.Fatalf("dispatch got ret=%v msg=%q", rsp.Ret, rsp.Msg)
+	rsp := popOpenRsp(t, father.sendq, 3*time.Second)
+	if rsp.Id != "x" {
+		t.Fatalf("dispatch got id=%q want x", rsp.Id)
+	}
+	if rsp.Ret || rsp.Msg == "" {
+		t.Fatalf("dispatch got ret=%v msg=%q, want a failed OPEN", rsp.Ret, rsp.Msg)
 	}
 }

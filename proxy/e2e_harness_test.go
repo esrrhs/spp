@@ -54,8 +54,6 @@ func testConfig(key string) *Config {
 	cfg.Key = key
 	cfg.Encrypt = ""
 	cfg.EncryptType = EncryptNone
-	cfg.MaxSonny = 200000
-	cfg.MaxClient = 200000
 	return cfg
 }
 

@@ -21,3 +21,7 @@ benchmark/socks5_rudp/out/
 
 # Dependency directories (remove the comment below to include it)
 # vendor/
+
+
+# WorkBuddy 工作空间记忆（本地）
+.workbuddy/
