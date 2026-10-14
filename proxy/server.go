@@ -25,6 +25,14 @@ type ClientConn struct {
 	inputs  []*Inputer
 	outputs []*Outputer
 	svcMu   sync.Mutex // guards inputs/outputs vs process* readers
+
+	// teardownMu serializes session publish (processLogin → clients.Store) with
+	// cleanupClientConn. thread.Group runs exitfunc as soon as any task fails,
+	// without waiting for processLogin, so AuthTimeout during the
+	// iniService→Store window used to let cleanup miss the map entry and then
+	// processLogin Store a dead session — permanently leaking clientNum.
+	teardownMu sync.Mutex
+	tornDown   int32 // atomic; set under teardownMu by cleanupClientConn
 }
 
 func (c *ClientConn) closeServices() {
@@ -248,15 +256,42 @@ func (s *Server) serveConn(sess *ClientConn) {
 // client reconnect with the same fromaddr fails iniService until the server
 // restarts. The client counter is decremented only when this teardown owns
 // the map entry (a never-published session never incremented it).
+//
+// tornDown is set under teardownMu before the map delete so a concurrent
+// processLogin cannot Store after this cleanup and leak clientNum.
 func (s *Server) cleanupClientConn(sess *ClientConn) {
+	sess.teardownMu.Lock()
+	atomic.StoreInt32(&sess.tornDown, 1)
 	if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
 		atomic.AddInt32(&s.clientNum, -1)
 	}
+	sess.teardownMu.Unlock()
+
 	sess.closeServices()
 	sess.setEstablished(false)
 	sess.closeConn()
 	sess.bizq.Close()
 	sess.CloseChannels()
+}
+
+func (c *ClientConn) isTornDown() bool {
+	return atomic.LoadInt32(&c.tornDown) != 0
+}
+
+// tryPublishClient registers a freshly logged-in session. Returns false when
+// cleanupClientConn already claimed the session (conn group exited during the
+// login startup window); the caller must drop any services it started and not
+// treat the login as established.
+func (s *Server) tryPublishClient(sess *ClientConn) bool {
+	sess.teardownMu.Lock()
+	defer sess.teardownMu.Unlock()
+	if atomic.LoadInt32(&sess.tornDown) != 0 {
+		return false
+	}
+	s.clients.Store(sess.clientID, sess)
+	atomic.AddInt32(&s.clientNum, 1)
+	sess.setEstablished(true)
+	return true
 }
 
 func (s *Server) sendAuthChallenge(sess *ClientConn) error {
@@ -380,6 +415,15 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 	// routeOpenToOutput, leaving the reverse-proxy conn half-open until timeout.
 	sess.SendFrame(rf)
 
+	// Conn group may already be exiting (AuthTimeout / parent Stop) before we
+	// start services: skip the bind work and do not publish.
+	if sess.isTornDown() {
+		sess.setNeedClose()
+		loggo.Error("processLogin aborted before iniService: session already torn down %s name=%s",
+			sess.conn.Info(), sess.name)
+		return
+	}
+
 	if err := s.iniService(s.wg, f, sess); err != nil {
 		// The ok LOGINRSP may already be on the wire: drop the session so the
 		// client reconnects instead of serving against half-started services.
@@ -388,9 +432,16 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 		return
 	}
 
-	s.clients.Store(sess.clientID, sess)
-	atomic.AddInt32(&s.clientNum, 1)
-	sess.setEstablished(true)
+	if !s.tryPublishClient(sess) {
+		// cleanupClientConn won the race in the iniService→Store window: it
+		// already closed an earlier service snapshot and will not see this
+		// Store. Drop whatever iniService just started and refuse to establish.
+		sess.closeServices()
+		sess.setNeedClose()
+		loggo.Error("processLogin aborted after iniService: session already torn down %s name=%s",
+			sess.conn.Info(), sess.name)
+		return
+	}
 
 	loggo.Info("processLogin ok %s name=%s session=%d services=%d compress=%s encrypt=%s",
 		sess.conn.Info(), sess.name, sess.clientID, len(loginServicesOf(f.LoginFrame)),

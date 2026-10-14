@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -686,6 +687,130 @@ func reverseLoginSession(t *testing.T, s *Server, cfg *Config, fromAddr string) 
 		t.Fatal("reverse session must be established")
 	}
 	return sess
+}
+
+// TestServer_TryPublishClient_AbortedAfterTeardown pins the ghost-session
+// fix: cleanupClientConn that wins the iniService→Store race must leave
+// tryPublishClient returning false with clientNum untouched.
+func TestServer_TryPublishClient_AbortedAfterTeardown(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "unit-publish-abort"
+	s := startUnitTestServer(t, cfg)
+
+	sess := newTestClientConn(cfg)
+	sess.clientID = 42
+	s.cleanupClientConn(sess)
+
+	if s.tryPublishClient(sess) {
+		t.Fatal("tryPublishClient must fail after cleanup")
+	}
+	if sess.isEstablished() {
+		t.Fatal("aborted publish must not mark established")
+	}
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("clientSize=%d want 0 after aborted publish", n)
+	}
+	if _, ok := s.clients.Load(sess.clientID); ok {
+		t.Fatal("ghost session left in clients map")
+	}
+
+	// Fresh session still publishes, then cleanup reclaims the counter.
+	sess2 := newTestClientConn(cfg)
+	sess2.clientID = 43
+	if !s.tryPublishClient(sess2) {
+		t.Fatal("fresh session must publish")
+	}
+	if n := s.clientSize(); n != 1 {
+		t.Fatalf("clientSize=%d want 1", n)
+	}
+	s.cleanupClientConn(sess2)
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("clientSize=%d want 0 after cleanup", n)
+	}
+}
+
+// TestServer_LoginPublish_RaceWithCleanup hammers publish vs teardown: after
+// both finish, clientNum and the map must be empty (no permanent leak).
+func TestServer_LoginPublish_RaceWithCleanup(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "unit-publish-race"
+	s := startUnitTestServer(t, cfg)
+
+	const rounds = 200
+	for i := 0; i < rounds; i++ {
+		sess := newTestClientConn(cfg)
+		sess.clientID = uint64(i + 1)
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_ = s.tryPublishClient(sess)
+		}()
+		go func() {
+			defer wg.Done()
+			s.cleanupClientConn(sess)
+		}()
+		wg.Wait()
+
+		if n := s.clientSize(); n != 0 {
+			t.Fatalf("round %d: leaked clientSize=%d", i, n)
+		}
+		if _, ok := s.clients.Load(sess.clientID); ok {
+			t.Fatalf("round %d: ghost session in map", i)
+		}
+	}
+}
+
+// TestServer_ProcessLogin_AbortedAfterTeardown: if cleanup claims the session
+// before processLogin finishes, LOGINRSP may already be queued but the session
+// must not be published or established. Only the tornDown flag is set here so
+// the send queue stays readable (full cleanupClientConn would CloseChannels).
+func TestServer_ProcessLogin_AbortedAfterTeardown(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "unit-login-abort"
+	s := startUnitTestServer(t, cfg)
+
+	sess := newTestClientConn(cfg)
+	ch, err := makeAuthChallenge()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.authChallenge = ch
+
+	// Claim publish ownership the way cleanupClientConn does under teardownMu,
+	// without closing the session queues.
+	sess.teardownMu.Lock()
+	atomic.StoreInt32(&sess.tornDown, 1)
+	sess.teardownMu.Unlock()
+
+	fromAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	s.processLogin(&ProxyFrame{LoginFrame: &LoginFrame{
+		Name:       "unit-abort",
+		Clienttype: CLIENT_TYPE_REVERSE_PROXY,
+		AuthProof:  computeAuthProof(cfg.Key, ch),
+		Services: []*LoginService{{
+			Proxyproto: PROXY_PROTO_TCP,
+			Fromaddr:   fromAddr,
+			Toaddr:     "127.0.0.1:1",
+		}},
+	}}, sess)
+
+	lr := mustPopLoginRsp(t, sess.sendq)
+	if !lr.Ret {
+		t.Fatalf("ok LOGINRSP still queued before abort check, got ret=%v msg=%q", lr.Ret, lr.Msg)
+	}
+	if sess.isEstablished() {
+		t.Fatal("torn-down session must not become established")
+	}
+	if n := s.clientSize(); n != 0 {
+		t.Fatalf("clientSize=%d want 0", n)
+	}
+	if !sess.isNeedClose() {
+		t.Fatal("aborted login must mark needclose so the wire path exits")
+	}
+	// Early abort skips iniService, so the reverse port must never listen.
+	waitForPortClosed(t, fromAddr, 3*time.Second)
 }
 
 // TestServer_CleanupClientConn_ClosesServices pins the login startup-window
