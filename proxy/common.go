@@ -37,8 +37,6 @@ type Config struct {
 	ShowPing                  bool          // 是否显示ping
 	Username                  string        // 登录用户名
 	Password                  string        // 登录密码
-	MaxClient                 int           // 最大客户端数目
-	MaxSonny                  int           // 最大连接数目
 	MainWriteChannelTimeoutMs int           // 主通道转发消息超时
 	Congestion                string        // 拥塞算法
 	KcpFecDataShards          int           // KCP FEC 数据分片数，0 关闭 FEC；启用时客户端与服务端必须配置一致
@@ -64,8 +62,6 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MaxClient:                 10000,
-		MaxSonny:                  10240,
 		MainWriteChannelTimeoutMs: 1000,
 		Congestion:                "bb",
 	}
@@ -161,9 +157,9 @@ func localHandshakeTimeout(cfg *Config) time.Duration {
 }
 
 // handshakeWatchdog bounds a local proxy listener (SOCKS5/HTTP) handshake.
-// Handshaking conns are not registered in Inputer.sonny yet, so neither
-// MaxSonny nor checkSonnyActive can bound them; a peer that connects and
-// stays silent, or sends only half a request (slowloris / scanner), would
+// Handshaking conns are not registered in Inputer.sonny yet, so
+// checkSonnyActive cannot bound them; a peer that connects and stays
+// silent, or sends only half a request (slowloris / scanner), would
 // otherwise pin a goroutine and an fd forever. network.Conn does not expose
 // socket deadlines, so the watchdog closes the conn itself, unblocking the
 // handshake Read with an error. The returned cancel is idempotent: call it

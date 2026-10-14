@@ -113,8 +113,6 @@ type ConfigFile struct {
 	Ping         *bool    `json:"ping,omitempty"`
 	Username     string   `json:"username,omitempty"`
 	Password     string   `json:"password,omitempty"`
-	MaxClient    *int     `json:"maxclient,omitempty"`
-	MaxConn      *int     `json:"maxconn,omitempty"`
 	KcpFecData   *int     `json:"kcpfecdata,omitempty"`
 	KcpFecParity *int     `json:"kcpfecparity,omitempty"`
 	StatusAddr   string   `json:"statusaddr,omitempty"`
@@ -168,8 +166,6 @@ func main() {
 	ping := flag.Bool("ping", false, "show ping")
 	username := flag.String("username", "", "socks5 username")
 	password := flag.String("password", "", "socks5 password")
-	maxclient := flag.Int("maxclient", 10000, "max client connection")
-	maxconn := flag.Int("maxconn", 10240, "max connection")
 	kcpfecdata := flag.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
 	kcpfecparity := flag.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
 	statusAddr := flag.String("statusaddr", "", "HTTP health/status listen address (e.g. 127.0.0.1:6060), empty disables; serves /healthz and /status")
@@ -263,12 +259,6 @@ func main() {
 		if !cliSet["password"] && fileCfg.Password != "" {
 			*password = fileCfg.Password
 		}
-		if !cliSet["maxclient"] && fileCfg.MaxClient != nil {
-			*maxclient = *fileCfg.MaxClient
-		}
-		if !cliSet["maxconn"] && fileCfg.MaxConn != nil {
-			*maxconn = *fileCfg.MaxConn
-		}
 		if !cliSet["kcpfecdata"] && fileCfg.KcpFecData != nil {
 			*kcpfecdata = *fileCfg.KcpFecData
 		}
@@ -322,8 +312,6 @@ func main() {
 	config.ShowPing = *ping
 	config.Username = *username
 	config.Password = *password
-	config.MaxClient = *maxclient
-	config.MaxSonny = *maxconn
 	config.KcpFecDataShards = *kcpfecdata
 	config.KcpFecParityShards = *kcpfecparity
 

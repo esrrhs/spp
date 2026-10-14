@@ -353,9 +353,6 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.EncryptType != EncryptChaCha20 {
 		t.Errorf("unexpected EncryptType: %v", cfg.EncryptType)
 	}
-	if cfg.MaxClient <= 0 || cfg.MaxSonny <= 0 {
-		t.Errorf("invalid default limits: client=%d, sonny=%d", cfg.MaxClient, cfg.MaxSonny)
-	}
 	if cfg.KcpFecDataShards != 0 || cfg.KcpFecParityShards != 0 {
 		t.Errorf("KCP FEC must default off for wire compat: data=%d parity=%d", cfg.KcpFecDataShards, cfg.KcpFecParityShards)
 	}

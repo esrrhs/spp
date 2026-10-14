@@ -16,7 +16,7 @@
 #
 # Common knobs (env):
 #   WORKERS DURATION BS REQ PAGESIZE
-#   COMPRESS ENCRYPT PROTO KEY MAXCONN
+#   COMPRESS ENCRYPT PROTO KEY
 #   PROFILE=1 PROFILE_SECONDS=15
 #   KEEP_RUNNING=1
 #   SERVER_PORT SOCKS_PORT BACKEND_PORT
@@ -30,4 +30,3 @@ Defaults match the tuning runs:
 - bulk:  64 workers, 32KB chunks, sink backend, ~30s
 - short: 200 workers, 4KB echo (byte-exact verify), echo backend, ~25s
 - page:  100 workers, 512B req + 100KB page (len+SHA-256+bytes verify), ~20s
-- MAXCONN defaults to 200000 (product default 10240 is too low for short-conn churn)

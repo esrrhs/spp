@@ -23,9 +23,6 @@ KEY="${KEY:-bench-auth-key}"
 ENCRYPT="${ENCRYPT:-bench-encrypt-key}"
 COMPRESS="${COMPRESS:-128}"
 PROTO="${PROTO:-rudp}"
-# Short-conn churn can open >10k sockets before idle timeout reclaims them.
-# Default product MaxSonny=10240 would reject mid-test and poison the result.
-MAXCONN="${MAXCONN:-200000}"
 
 PROFILE="${PROFILE:-0}"          # 1 = capture CPU profiles during load
 PROFILE_SECONDS="${PROFILE_SECONDS:-15}"
@@ -108,7 +105,7 @@ start_stack() {
     </dev/null >"$LOG_DIR/backend.log" 2>&1 &
   echo $! >> "$OUT_DIR/pids"
 
-  log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT maxconn=$MAXCONN"
+  log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT"
   setsid "$SPP_BIN" \
     -type server \
     -listen ":${SERVER_PORT}" \
@@ -116,7 +113,6 @@ start_stack() {
     -key "$KEY" \
     -encrypt "$ENCRYPT" \
     -compress "$COMPRESS" \
-    -maxconn "$MAXCONN" \
     -noprint 1 -nolog 1 -loglevel error \
     -profile "$SERVER_PPROF" \
     </dev/null >"$LOG_DIR/server.log" 2>&1 &
@@ -132,7 +128,6 @@ start_stack() {
     -key "$KEY" \
     -encrypt "$ENCRYPT" \
     -compress "$COMPRESS" \
-    -maxconn "$MAXCONN" \
     -noprint 1 -nolog 1 -loglevel error \
     -profile "$CLIENT_PPROF" \
     </dev/null >"$LOG_DIR/client.log" 2>&1 &
