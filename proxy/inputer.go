@@ -24,6 +24,7 @@ type Inputer struct {
 	listenconn network.Conn
 	sonny      sync.Map
 	sonnyNum   int32 // atomic; tracks entries in sonny
+	closed     atomic.Bool
 }
 
 func NewInputer(wg *thread.Group, proto string, addr string, clienttype CLIENT_TYPE, config *Config, father *ProxyConn, targetAddr string, serviceIndex int) (*Inputer, error) {
@@ -89,6 +90,13 @@ func NewSocks5Inputer(wg *thread.Group, proto string, addr string, clienttype CL
 }
 
 func (i *Inputer) Close() {
+	// Mark closed first so the accept loops stop retrying a permanently
+	// dead listener: after Close, Accept keeps returning the same error
+	// forever (net.ErrClosed for TCP), and the loops only watched the
+	// root group — which stays alive across server-conn reconnects — so
+	// every teardown used to leave a loop spinning at the retry-backoff
+	// rate until the whole client shut down.
+	i.closed.Store(true)
 	// Signal sonny to exit. Close TCP accepted conns here; UDP accepted conns are
 	// owned by the listener and closed inside listenconn.Close (avoid double Close).
 	i.sonny.Range(func(key, value interface{}) bool {
@@ -103,6 +111,20 @@ func (i *Inputer) Close() {
 	// inside an outer Group.exit callback (avoids gohome Group.isexit races).
 	listen := i.listenconn
 	go listen.Close()
+}
+
+// spawnSonny hands a fully-handshaked conn to its sonny owner
+// (processProxyConn / handleSocks5UDPAssociate). Returns false when the
+// root group is already exiting: Group.Go would then silently drop the
+// task, and the conn — not registered in i.sonny yet, so nothing else
+// would ever close it — would be orphaned with its fd. The caller must
+// close the conn itself in that case.
+func (i *Inputer) spawnSonny(name string, f func()) bool {
+	if isExit(i.fwg) {
+		return false
+	}
+	goSafe(i.fwg, name, f)
+	return true
 }
 
 func (i *Inputer) processDataFrame(f *ProxyFrame) {
@@ -154,31 +176,27 @@ func (i *Inputer) listen(targetAddr string) {
 
 	loggo.Info("Inputer start listen %s %s", i.addr, targetAddr)
 
-	for !isExit(i.fwg) {
+	for !isExit(i.fwg) && !i.closed.Load() {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
 			// Avoid busy-loop+log CPU spikes when Accept fails (e.g. EMFILE).
 			loggo.Debug("Inputer listen Accept fail %s", err)
-			if isExit(i.fwg) {
+			if isExit(i.fwg) || i.closed.Load() {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
-		size := i.sonnySize()
-		if size >= i.config.MaxSonny {
-			loggo.Info("Inputer listen max sonny %s %d", conn.Info(), size)
-			conn.Close()
-			continue
-		}
-
 		proxyconn := &ProxyConn{conn: conn}
-		goSafe(i.fwg, "Inputer processProxyConn"+" "+targetAddr, func() {
+		if !i.spawnSonny("Inputer processProxyConn"+" "+targetAddr, func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
 			i.processProxyConn(proxyconn, targetAddr)
-		})
+		}) {
+			proxyconn.closeConn()
+			continue
+		}
 	}
 	loggo.Info("Inputer end listen %s", i.addr)
 }
@@ -187,31 +205,27 @@ func (i *Inputer) listenSocks5() {
 
 	loggo.Info("Inputer start listenSocks5 %s", i.addr)
 
-	for !isExit(i.fwg) {
+	for !isExit(i.fwg) && !i.closed.Load() {
 		conn, err := i.listenconn.Accept()
 		if err != nil {
 			// Avoid busy-loop+log CPU spikes when Accept fails (e.g. EMFILE from CLOSE-WAIT pileup).
 			loggo.Debug("Inputer listenSocks5 Accept fail %s", err)
-			if isExit(i.fwg) {
+			if isExit(i.fwg) || i.closed.Load() {
 				break
 			}
 			time.Sleep(10 * time.Millisecond)
 			continue
 		}
 
-		size := i.sonnySize()
-		if size >= i.config.MaxSonny {
-			loggo.Info("Inputer listen max sonny %s %d", conn.Info(), size)
-			conn.Close()
-			continue
-		}
-
 		proxyconn := &ProxyConn{conn: conn}
-		goSafe(i.fwg, "Inputer processSocks5Conn"+" "+conn.Info(), func() {
+		if !i.spawnSonny("Inputer processSocks5Conn"+" "+conn.Info(), func() {
 			atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, 1)
 			defer atomic.AddInt32(&gStateThreadNum.InputerSonnyThread, -1)
 			i.processSocks5Conn(proxyconn)
-		})
+		}) {
+			proxyconn.closeConn()
+			continue
+		}
 	}
 	loggo.Info("Inputer end listenSocks5 %s", i.addr)
 }
@@ -275,10 +289,12 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) {
 
 	if reqCmd == network.Socks5CmdUDPAssociate {
 		loggo.Info("processSocks5Conn UDP ASSOCIATE %s", proxyConn.conn.Info())
-		goSafe(i.fwg, "Inputer socks5UDPAssociate"+" "+proxyConn.conn.Info(), func() {
+		if !i.spawnSonny("Inputer socks5UDPAssociate"+" "+proxyConn.conn.Info(), func() {
 			defer proxyConn.closeConn()
 			i.handleSocks5UDPAssociate(proxyConn, targetAddr)
-		})
+		}) {
+			proxyConn.closeConn()
+		}
 		return
 	}
 
@@ -295,9 +311,11 @@ func (i *Inputer) processSocks5Conn(proxyConn *ProxyConn) {
 
 	loggo.Debug("processSocks5Conn ok %s %s", proxyConn.conn.Info(), targetAddr)
 
-	goSafe(i.fwg, "Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() {
+	if !i.spawnSonny("Inputer processProxyConn"+" "+proxyConn.conn.Info(), func() {
 		i.processProxyConn(proxyConn, targetAddr)
-	})
+	}) {
+		proxyConn.closeConn()
+	}
 }
 
 func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {

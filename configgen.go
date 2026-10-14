@@ -120,8 +120,6 @@ func defaultServerConfig(key, encrypt string) ConfigFile {
 	cfg.Type = "server"
 	cfg.Proto = protos
 	cfg.Listen = allMainListens(protos)
-	cfg.MaxClient = ptrInt(10000)
-	cfg.MaxConn = ptrInt(10240)
 	return cfg
 }
 
