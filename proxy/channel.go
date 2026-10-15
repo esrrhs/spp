@@ -91,7 +91,8 @@ type prioQueue struct {
 	// (q[i] = q[i][1:]), which leaves the backing array's capacity behind at
 	// the new start: the very next append then reallocates and copies the
 	// whole queue. Advancing head instead keeps the array and makes the
-	// steady state allocation-free.
+	// steady state allocation-free. When head grows large or the queue drains,
+	// it rewinds/compacts so the backing array never grows unbounded.
 	head [prioCount]int
 }
 
@@ -136,6 +137,27 @@ func (q *prioQueue) limitForPrio(p framePrio) int {
 	}
 }
 
+func (q *prioQueue) compactLocked(p framePrio) {
+	if q.head[p] == 0 {
+		return
+	}
+	n := copy(q.q[p], q.q[p][q.head[p]:])
+	for j := n; j < len(q.q[p]); j++ {
+		q.q[p][j] = nil
+	}
+	q.q[p] = q.q[p][:n]
+	q.head[p] = 0
+}
+
+func (q *prioQueue) pushItemLocked(v interface{}, p framePrio) {
+	if len(q.q[p]) == cap(q.q[p]) && q.head[p] > 0 {
+		q.compactLocked(p)
+	}
+	q.q[p] = append(q.q[p], v)
+	q.size++
+	q.cond.Signal()
+}
+
 func (q *prioQueue) Push(v interface{}, p framePrio) {
 	if p < 0 || p >= prioCount {
 		p = prioBulk
@@ -149,9 +171,7 @@ func (q *prioQueue) Push(v interface{}, p framePrio) {
 	if q.closed {
 		return
 	}
-	q.q[p] = append(q.q[p], v)
-	q.size++
-	q.cond.Signal()
+	q.pushItemLocked(v, p)
 }
 
 func (q *prioQueue) PushTimeout(v interface{}, p framePrio, timeoutms int) bool {
@@ -178,9 +198,7 @@ func (q *prioQueue) PushTimeout(v interface{}, p framePrio, timeoutms int) bool 
 	if q.closed {
 		return true
 	}
-	q.q[p] = append(q.q[p], v)
-	q.size++
-	q.cond.Signal()
+	q.pushItemLocked(v, p)
 	return true
 }
 
@@ -228,6 +246,10 @@ func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, 
 			// Drained: rewind so the backing array keeps its capacity.
 			q.q[i] = q.q[i][:0]
 			q.head[i] = 0
+		} else if q.head[i] >= 64 && q.head[i] >= len(q.q[i])/2 {
+			// Compact partially drained queue to prevent unbounded backing array growth
+			// during continuous streaming where the queue never fully drains.
+			q.compactLocked(i)
 		}
 		q.size--
 		q.cond.Broadcast()
