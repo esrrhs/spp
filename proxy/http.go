@@ -64,16 +64,73 @@ func checkProxyAuth(authHeader, username, password string) bool {
 	return string(decoded) == expected
 }
 
+// validPort reports whether p is a plain numeric port in [0,65535].
+// The port comes straight out of the request line / Host header, so a
+// non-numeric one ("host:abc", "host:99999") must be rejected here instead
+// of reaching net.Dial and failing with an opaque error — or, worse, being
+// glued into an address that no longer parses at all (parseHost(":", ":")
+// used to return "::"; found by FuzzParseHost).
+func validPort(p string) bool {
+	if p == "" || len(p) > 5 {
+		return false
+	}
+	v := 0
+	for i := 0; i < len(p); i++ {
+		if p[i] < '0' || p[i] > '9' {
+			return false
+		}
+		v = v*10 + int(p[i]-'0')
+	}
+	return v <= 65535
+}
+
 func parseHost(rawHost, defaultPort string) string {
 	rawHost = strings.TrimSpace(rawHost)
+	// Every branch below falls back to defaultPort, so a malformed one can
+	// never produce a dialable address. Callers pass "80"/"443".
+	if !validPort(defaultPort) {
+		return ""
+	}
 	if host, port, err := net.SplitHostPort(rawHost); err == nil {
+		// A host that still carries a colon is either an IPv6 literal or
+		// garbage out of the request line ("[:]:" splits to host ":").
+		// JoinHostPort would bracket either, so only the literal passes.
+		if strings.Contains(host, ":") && net.ParseIP(host) == nil {
+			return ""
+		}
+		// "host:" splits with an empty port; fall back instead of dialing a
+		// portless address.
+		if port == "" {
+			port = defaultPort
+		}
+		if !validPort(port) {
+			return ""
+		}
 		return net.JoinHostPort(host, port)
 	}
 	// A bracketed IPv6 literal without a port ("[::1]") is rejected by
 	// SplitHostPort; strip the brackets first or JoinHostPort would double
-	// them into "[[::1]]:443".
+	// them into "[[::1]]:443". Brackets around anything that is not an IP
+	// ("[:]") are garbage too.
 	if len(rawHost) >= 2 && rawHost[0] == '[' && rawHost[len(rawHost)-1] == ']' {
-		return net.JoinHostPort(rawHost[1:len(rawHost)-1], defaultPort)
+		inner := rawHost[1 : len(rawHost)-1]
+		if net.ParseIP(inner) == nil {
+			return ""
+		}
+		return net.JoinHostPort(inner, defaultPort)
+	}
+	// Whatever is left is either a bare IPv6 literal — JoinHostPort brackets
+	// those correctly — or garbage out of the request line / Host header.
+	// Garbage must not reach JoinHostPort: it brackets anything containing a
+	// colon (":]" became "[:]]:0") and passes brackets straight through
+	// ("[[" became "[[:0"), producing addresses that are neither dialable
+	// nor readable in the logs. Report them as unparseable and let the
+	// caller close the conn.
+	if strings.ContainsAny(rawHost, "[]") {
+		return ""
+	}
+	if strings.Contains(rawHost, ":") && net.ParseIP(rawHost) == nil {
+		return ""
 	}
 	return net.JoinHostPort(rawHost, defaultPort)
 }
