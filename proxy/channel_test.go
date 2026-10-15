@@ -382,3 +382,45 @@ func TestPrioQueue_ConcurrentStress(t *testing.T) {
 		t.Fatalf("consumed %d want %d (lost frames under concurrency)", got, total)
 	}
 }
+
+func TestPrioQueue_SustainedStreamBoundedCapacity(t *testing.T) {
+	// When continuous traffic flows through prioQueue without the queue
+	// ever hitting size 0, slice capacity must remain bounded rather than
+	// growing monotonically with the number of frames forwarded.
+	q := newPrioQueue(16)
+
+	// Seed with 2 items so size is always >= 1.
+	q.Push(0, prioBulk)
+	q.Push(1, prioBulk)
+
+	const n = 2000
+	for i := 2; i < n; i++ {
+		// Pop 1, push 1: size stays at 2, never reaching 0.
+		v, closed, ok := q.PopWait(time.Second)
+		if !ok || closed {
+			t.Fatalf("pop at %d failed: ok=%v closed=%v", i, ok, closed)
+		}
+		if v.(int) != i-2 {
+			t.Fatalf("FIFO broken at %d: got %v want %d", i, v, i-2)
+		}
+		q.Push(i, prioBulk)
+	}
+
+	q.mu.Lock()
+	maxCap := cap(q.q[prioBulk])
+	q.mu.Unlock()
+
+	// Capacity must be bounded to reasonable size, not O(n).
+	if maxCap > 128 {
+		t.Fatalf("capacity grew unbounded under sustained traffic: cap=%d for %d items", maxCap, n)
+	}
+
+	// Drain remaining 2 items.
+	for i := n - 2; i < n; i++ {
+		v, closed, ok := q.PopWait(time.Second)
+		if !ok || closed || v.(int) != i {
+			t.Fatalf("final pop want %d got %v", i, v)
+		}
+	}
+}
+
