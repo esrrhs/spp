@@ -572,10 +572,9 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			return err
 		}
 
-		msglen := uint32(len(plain))
-		if msglen > maxWire || msglen == 0 {
-			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
-			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
+		if len(plain) == 0 {
+			loggo.Error("sendTo len fail: %s %d", conn.Info(), len(plain))
+			return errors.New("msg len fail 0")
 		}
 
 		// Keep the 4-byte prefix slot and append the sealed body behind it.
@@ -585,10 +584,16 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			return err
 		}
 
+		msglen := uint32(len(wire) - 4)
+		if msglen > maxWire || msglen == 0 {
+			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
+			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
+		}
+
 		if loggo.IsDebug() {
 			loggo.Debug("sendTo start Write len %s %d", conn.Info(), msglen)
 		}
-		binary.LittleEndian.PutUint32(wire[:4], uint32(len(wire)-4))
+		binary.LittleEndian.PutUint32(wire[:4], msglen)
 
 		n, err := conn.Write(wire)
 		if err != nil {
