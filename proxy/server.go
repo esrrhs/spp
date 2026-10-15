@@ -20,7 +20,9 @@ type ClientConn struct {
 
 	clienttype CLIENT_TYPE
 	name       string // optional client tag; not unique, not used for auth
-	clientID   uint64 // server-local session id for tracking
+	// clientID is set by processLogin while processSession is already running
+	// (both are spawned from serveConn), so every access goes through atomic.
+	clientID uint64
 
 	inputs  []*Inputer
 	outputs []*Outputer
@@ -262,7 +264,7 @@ func (s *Server) serveConn(sess *ClientConn) {
 func (s *Server) cleanupClientConn(sess *ClientConn) {
 	sess.teardownMu.Lock()
 	atomic.StoreInt32(&sess.tornDown, 1)
-	if _, ok := s.clients.LoadAndDelete(sess.clientID); ok {
+	if _, ok := s.clients.LoadAndDelete(atomic.LoadUint64(&sess.clientID)); ok {
 		atomic.AddInt32(&s.clientNum, -1)
 	}
 	sess.teardownMu.Unlock()
@@ -288,7 +290,7 @@ func (s *Server) tryPublishClient(sess *ClientConn) bool {
 	if atomic.LoadInt32(&sess.tornDown) != 0 {
 		return false
 	}
-	s.clients.Store(sess.clientID, sess)
+	s.clients.Store(atomic.LoadUint64(&sess.clientID), sess)
 	atomic.AddInt32(&s.clientNum, 1)
 	sess.setEstablished(true)
 	return true
@@ -391,13 +393,14 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 
 	sess.clienttype = f.LoginFrame.Clienttype
 	sess.name = f.LoginFrame.Name
-	sess.clientID = atomic.AddUint64(&s.nextClientID, 1)
+	sessID := atomic.AddUint64(&s.nextClientID, 1)
+	atomic.StoreUint64(&sess.clientID, sessID)
 
 	rf.LoginRspFrame.Ret = true
 	rf.LoginRspFrame.Msg = "ok"
 	rf.LoginRspFrame.CompressType = agreeC
 	rf.LoginRspFrame.EncryptType = agreeE
-	rf.LoginRspFrame.SessionId = sess.clientID
+	rf.LoginRspFrame.SessionId = sessID
 	// Queue LOGINRSP BEFORE starting services. SendFrame only enqueues and the
 	// wire writer drains sendq with strict FIFO inside the prioControl bucket,
 	// so the client is guaranteed to process LOGINRSP — and synchronously build
@@ -436,12 +439,12 @@ func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
 	}
 
 	loggo.Info("processLogin ok %s name=%s session=%d services=%d compress=%s encrypt=%s",
-		sess.conn.Info(), sess.name, sess.clientID, len(loginServicesOf(f.LoginFrame)),
+		sess.conn.Info(), sess.name, sessID, len(loginServicesOf(f.LoginFrame)),
 		compressTypeName(agreeC), encryptTypeName(agreeE))
 }
 
 func (s *Server) processSession(wg *thread.Group, sess *ClientConn) {
-	loggo.Info("processSession start %d", sess.clientID)
+	loggo.Info("processSession start %d", atomic.LoadUint64(&sess.clientID))
 	for !isExit(wg) {
 		v, closed, ok := sess.bizq.PopWait(time.Second)
 		if !ok {
@@ -462,7 +465,7 @@ func (s *Server) processSession(wg *thread.Group, sess *ClientConn) {
 			s.processClose(f, sess)
 		}
 	}
-	loggo.Info("processSession end %d", sess.clientID)
+	loggo.Info("processSession end %d", atomic.LoadUint64(&sess.clientID))
 }
 
 func loginServicesOf(f *LoginFrame) []*LoginService {

@@ -201,7 +201,9 @@ func StartStatusServer(addr string, report func() StatusReport) (*StatusServer, 
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 	go func() {
-		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		// Close() shuts the listener before Serve gets here, so a closed-socket
+		// error is the normal path, not something to log.
+		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
 			loggo.Error("status server: %s", err.Error())
 		}
 	}()
@@ -216,6 +218,15 @@ func (s *StatusServer) Addr() string {
 
 // Close gracefully shuts the status server down.
 func (s *StatusServer) Close() error {
+	// Close the listener ourselves first. Shutdown only closes listeners that
+	// Serve has tracked, and Serve runs in a goroutine: calling Close right
+	// after Start can win that race, so Shutdown finds an empty listener set
+	// and returns while the socket is still accepting. Close must not return
+	// until the port is actually gone (found by TestStatusServer_GracefulClose
+	// under -race on CI).
+	if s.ln != nil {
+		_ = s.ln.Close()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	return s.httpSrv.Shutdown(ctx)

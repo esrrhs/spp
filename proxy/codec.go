@@ -335,6 +335,34 @@ func (p *ProxyConn) sealWire(plain []byte) ([]byte, error) {
 	return out, nil
 }
 
+// sealWireAppend appends the sealed blob to dst (the 4-byte length prefix the
+// send loop keeps at dst[:4] is preserved). Lets sendTo reuse one scratch
+// buffer for the whole connection instead of allocating per frame.
+func (p *ProxyConn) sealWireAppend(dst []byte, plain []byte) ([]byte, error) {
+	codec := p.getCodec()
+	if !isAEADEncrypt(codec.EncryptType) || codec.EncryptKey == "" {
+		return append(dst, plain...), nil
+	}
+	p.mu.RLock()
+	aead := p.aead
+	p.mu.RUnlock()
+	if aead == nil {
+		return nil, errors.New("AEAD not initialized")
+	}
+	nonce, err := p.nextNonce()
+	if err != nil {
+		return nil, err
+	}
+	need := len(nonce) + len(plain) + aead.Overhead()
+	if cap(dst)-len(dst) < need {
+		grown := make([]byte, len(dst), len(dst)+need+64)
+		copy(grown, dst)
+		dst = grown
+	}
+	dst = append(dst, nonce...)
+	return aead.Seal(dst, nonce, plain, nil), nil
+}
+
 // openWire AEAD-opens a wire blob when using AES-GCM/ChaCha20.
 func (p *ProxyConn) openWire(blob []byte) ([]byte, error) {
 	codec := p.getCodec()
@@ -354,10 +382,12 @@ func (p *ProxyConn) openWire(blob []byte) ([]byte, error) {
 	return aead.Open(nil, nonce, blob[aeadNonceSize:], nil)
 }
 
-func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
+// prepareFrame validates the frame and compresses its payload when the codec
+// asks for it. Shared by MarshalSrpFrame and MarshalSrpFrameAppend.
+func prepareFrame(f *ProxyFrame, codec FrameCodec) error {
 	err := checkProxyFame(f)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	if f.Type == FRAME_TYPE_DATA &&
@@ -367,7 +397,7 @@ func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
 		!f.DataFrame.Compress {
 		newb, err := compressPayload(codec.CompressType, f.DataFrame.Data)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if len(newb) < len(f.DataFrame.Data) {
 			if loggo.IsDebug() {
@@ -380,12 +410,27 @@ func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
 			f.DataFrame.CompressType = codec.CompressType
 		}
 	}
+	return nil
+}
 
+func MarshalSrpFrame(f *ProxyFrame, codec FrameCodec) ([]byte, error) {
+	if err := prepareFrame(f, codec); err != nil {
+		return nil, err
+	}
 	mb, err := proto.Marshal(f)
 	if err != nil {
 		return nil, err
 	}
 	return mb, err
+}
+
+// MarshalSrpFrameAppend marshals into dst instead of a fresh buffer, so the
+// send loop can reuse one scratch buffer across frames.
+func MarshalSrpFrameAppend(dst []byte, f *ProxyFrame, codec FrameCodec) ([]byte, error) {
+	if err := prepareFrame(f, codec); err != nil {
+		return nil, err
+	}
+	return proto.MarshalOptions{}.MarshalAppend(dst, f)
 }
 
 func UnmarshalSrpFrame(b []byte, codec FrameCodec) (*ProxyFrame, error) {
