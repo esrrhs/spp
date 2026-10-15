@@ -87,6 +87,12 @@ type prioQueue struct {
 	closed bool
 	done   chan struct{}
 	q      [prioCount][]interface{}
+	// head is the consume position per priority. Popping used to reslice
+	// (q[i] = q[i][1:]), which leaves the backing array's capacity behind at
+	// the new start: the very next append then reallocates and copies the
+	// whole queue. Advancing head instead keeps the array and makes the
+	// steady state allocation-free.
+	head [prioCount]int
 }
 
 func newPrioQueue(n int) *prioQueue {
@@ -212,11 +218,17 @@ func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, 
 		return nil, q.closed, false
 	}
 	for i := framePrio(0); i < prioCount; i++ {
-		if len(q.q[i]) == 0 {
+		if q.head[i] >= len(q.q[i]) {
 			continue
 		}
-		v = q.q[i][0]
-		q.q[i] = q.q[i][1:]
+		v = q.q[i][q.head[i]]
+		q.q[i][q.head[i]] = nil // drop the reference so the frame can be collected
+		q.head[i]++
+		if q.head[i] == len(q.q[i]) {
+			// Drained: rewind so the backing array keeps its capacity.
+			q.q[i] = q.q[i][:0]
+			q.head[i] = 0
+		}
 		q.size--
 		q.cond.Broadcast()
 		return v, false, true

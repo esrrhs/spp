@@ -38,12 +38,12 @@ kill_port_users "$CLIENT_PPROF" || true
 : > "$OUT_DIR/pids"
 
 log "start backend mode=page pagesize=$PAGESIZE :$BACKEND_PORT"
-setsid "$BACKEND_BIN" -addr "127.0.0.1:${BACKEND_PORT}" -mode page -pagesize "$PAGESIZE" \
+spawn_bg "$BACKEND_BIN" -addr "127.0.0.1:${BACKEND_PORT}" -mode page -pagesize "$PAGESIZE" \
   </dev/null >"$LOG_DIR/backend.log" 2>&1 &
 echo $! >> "$OUT_DIR/pids"
 
 log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT"
-setsid "$SPP_BIN" \
+spawn_bg "$SPP_BIN" \
   -type server \
   -listen ":${SERVER_PORT}" \
   -proto "$PROTO" \
@@ -56,7 +56,7 @@ setsid "$SPP_BIN" \
 echo $! >> "$OUT_DIR/pids"
 
 log "start socks5_client :$SOCKS_PORT -> server :$SERVER_PORT"
-setsid "$SPP_BIN" \
+spawn_bg "$SPP_BIN" \
   -type socks5_client \
   -server "127.0.0.1:${SERVER_PORT}" \
   -fromaddr ":${SOCKS_PORT}" \

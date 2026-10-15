@@ -509,7 +509,27 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 	defer atomic.AddInt32(&gStateThreadNum.SendThread, -1)
 
 	loggo.Info("sendTo start %s", conn.Info())
-	bs := make([]byte, 4)
+
+	// One scratch buffer for the whole connection: the 4-byte length prefix
+	// and the frame body go out in a single Write. Two Writes per frame meant
+	// two syscalls and, on the message-oriented transports (rudp/kcp/quic/
+	// ricmp), a lone 4-byte packet ahead of every frame — that doubles the
+	// packet rate, which is what a small cloud box runs out of first.
+	// Reusing the buffer is safe: every transport we ship copies the bytes
+	// inside Write (rudp/kcp/ricmp into their send buffer, tcp into the
+	// kernel, quic into the stream) before returning.
+	maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
+	// Start small and let the buffers grow: a connection that only ever
+	// carries control frames must not pin a megabyte of scratch for its
+	// lifetime, and a busy box has hundreds of these. Growth is handled by
+	// MarshalSrpFrameAppend/sealWireAppend, and the grown size is kept.
+	const scratchStart = 64 * 1024 // covers a full MAX_CHUNK_SIZE frame
+	scratch := scratchStart + aeadOverhead + 64
+	if cap1 := int(maxWire) + aeadOverhead + 64; cap1 < scratch {
+		scratch = cap1
+	}
+	wire := make([]byte, 4, scratch)
+	plain := make([]byte, 0, scratch)
 
 	for !isExit(wg) {
 		var f *ProxyFrame
@@ -545,46 +565,39 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			}
 		}
 
-		mb, err := MarshalSrpFrame(f, proxyconn.getCodec())
+		var err error
+		plain, err = MarshalSrpFrameAppend(plain[:0], f, proxyconn.getCodec())
 		if err != nil {
 			loggo.Error("sendTo MarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
 
-		mb, err = proxyconn.sealWire(mb)
-		if err != nil {
-			loggo.Error("sendTo sealWire fail: %s %s", conn.Info(), err.Error())
-			return err
-		}
-
-		msglen := uint32(len(mb))
-		maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
+		msglen := uint32(len(plain))
 		if msglen > maxWire || msglen == 0 {
 			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
 			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
 		}
 
-		if loggo.IsDebug() {
-			loggo.Debug("sendTo start Write len %s", conn.Info())
+		// Keep the 4-byte prefix slot and append the sealed body behind it.
+		wire, err = proxyconn.sealWireAppend(wire[:4], plain)
+		if err != nil {
+			loggo.Error("sendTo sealWire fail: %s %s", conn.Info(), err.Error())
+			return err
 		}
-		binary.LittleEndian.PutUint32(bs, msglen)
-		_, err = conn.Write(bs)
+
+		if loggo.IsDebug() {
+			loggo.Debug("sendTo start Write len %s %d", conn.Info(), msglen)
+		}
+		binary.LittleEndian.PutUint32(wire[:4], uint32(len(wire)-4))
+
+		n, err := conn.Write(wire)
 		if err != nil {
 			loggo.Info("sendTo Write fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
 
-		if loggo.IsDebug() {
-			loggo.Debug("sendTo start Write body %s %d", conn.Info(), msglen)
-		}
-		n, err := conn.Write(mb)
-		if err != nil {
-			loggo.Info("sendTo Write fail: %s %s", conn.Info(), err.Error())
-			return err
-		}
-
-		if n != len(mb) {
-			loggo.Error("sendTo Write len fail: %s %d %d", conn.Info(), n, len(mb))
+		if n != len(wire) {
+			loggo.Error("sendTo Write len fail: %s %d %d", conn.Info(), n, len(wire))
 			return errors.New("len error")
 		}
 
