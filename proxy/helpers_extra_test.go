@@ -157,6 +157,28 @@ func TestParseHost(t *testing.T) {
 		{"[::1]:443", "443", "[::1]:443"},
 		{"[2001:db8::1]", "80", "[2001:db8::1]:80"},
 		{"127.0.0.1:1", "443", "127.0.0.1:1"},
+		// Bare IPv6 literal: SplitHostPort rejects it, JoinHostPort brackets it.
+		{"::1", "80", "[::1]:80"},
+		// Empty port falls back to the default instead of dialing "host:".
+		{"host:", "80", "host:80"},
+		// Garbage that carries a colon is not an IPv6 literal: reported as
+		// unparseable rather than handed to JoinHostPort, which would wrap it
+		// in brackets (found by FuzzParseHost).
+		{":]", "80", ""},
+		{"a:b:c", "80", ""},
+		{"[[", "80", ""},
+		{"[::1", "80", ""},
+		{"[:]", "80", ""},
+		{"[:]:", "80", ""},
+		// Malformed ports are refused here rather than dialed (FuzzParseHost):
+		// "host:abc" used to reach net.Dial, and ":" with a broken default
+		// port used to glue into "::", which no longer parses at all.
+		{"example.com:abc", "80", ""},
+		{"example.com:99999", "80", ""},
+		{"example.com:0", "80", "example.com:0"},
+		{"[::1]:abc", "443", ""},
+		{"::1", "abc", ""},
+		{":", ":", ""},
 	}
 	for _, tc := range cases {
 		if got := parseHost(tc.in, tc.def); got != tc.want {
