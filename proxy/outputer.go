@@ -142,20 +142,31 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string, dialProto strin
 		loggo.Info("group end exit %s", c.Info())
 	})
 
+	// Group.Wait() returns as soon as the group takes an exit signal, without
+	// waiting for the task to finish, so the dial result must not travel
+	// through a bare shared variable - that is a data race (found under -race
+	// by TestAuthFailFlood_RudpWrongKeyClients). Guard it, and treat a missing
+	// conn as a failed dial even when Wait reported no error.
+	var connMu sync.Mutex
 	var conn network.Conn
 	wg.Go("Outputer Dial"+" "+targetAddr, func() error {
 		cc, err := dialWithTimeout(c, targetAddr, o.config.ConnectTimeout)
 		if err != nil {
 			return err
 		}
+		connMu.Lock()
 		conn = cc
+		connMu.Unlock()
 		return nil
 	})
 
 	err = wg.Wait()
-	if err != nil {
-		if conn != nil {
-			conn.Close()
+	connMu.Lock()
+	dialed := conn
+	connMu.Unlock()
+	if err != nil || dialed == nil {
+		if dialed != nil {
+			dialed.Close()
 		}
 		rf.OpenRspFrame.Ret = false
 		rf.OpenRspFrame.Msg = "Dial fail " + targetAddr
@@ -163,6 +174,7 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string, dialProto strin
 		loggo.Error("Outputer open Dial fail %s %s", targetAddr, err.Error())
 		return false
 	}
+	conn = dialed
 
 	loggo.Info("Outputer open Dial ok %s %s", id, targetAddr)
 
