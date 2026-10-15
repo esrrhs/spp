@@ -409,6 +409,18 @@ func checkProxyFame(f *ProxyFrame) error {
 		if f.AuthChallengeFrame == nil {
 			return errors.New("AuthChallengeFrame nil")
 		}
+	case FRAME_TYPE_CHANNEL_JOIN:
+		if f.ChannelJoinFrame == nil {
+			return errors.New("ChannelJoinFrame nil")
+		}
+	case FRAME_TYPE_CHANNEL_JOIN_RSP:
+		if f.ChannelJoinRspFrame == nil {
+			return errors.New("ChannelJoinRspFrame nil")
+		}
+	case FRAME_TYPE_SPEEDTEST:
+		if f.SpeedTestFrame == nil {
+			return errors.New("SpeedTestFrame nil")
+		}
 	default:
 		return errors.New("Type error")
 	}

@@ -291,6 +291,9 @@ func TestCheckProxyFrameErrors(t *testing.T) {
 		{Type: FRAME_TYPE_OPENRSP, OpenRspFrame: nil},
 		{Type: FRAME_TYPE_CLOSE, CloseFrame: nil},
 		{Type: FRAME_TYPE_AUTH_CHALLENGE, AuthChallengeFrame: nil},
+		{Type: FRAME_TYPE_CHANNEL_JOIN, ChannelJoinFrame: nil},
+		{Type: FRAME_TYPE_CHANNEL_JOIN_RSP, ChannelJoinRspFrame: nil},
+		{Type: FRAME_TYPE_SPEEDTEST, SpeedTestFrame: nil},
 		{Type: FRAME_TYPE(999)}, // Invalid type
 	}
 
@@ -302,6 +305,56 @@ func TestCheckProxyFrameErrors(t *testing.T) {
 		_, err = MarshalSrpFrame(f, codec)
 		if err == nil {
 			t.Errorf("MarshalSrpFrame case %d expected error, got nil", i)
+		}
+	}
+}
+
+func TestBackwardCompatibilityFrames(t *testing.T) {
+	codec := testCodec(0, "")
+
+	// 1. SPEEDTEST
+	{
+		f := &ProxyFrame{
+			Type: FRAME_TYPE_SPEEDTEST,
+			SpeedTestFrame: &SpeedTestFrame{
+				Id:       123,
+				SendTime: 456,
+				Payload:  []byte("probe"),
+				Echo:     false,
+			},
+		}
+		data, err := MarshalSrpFrame(f, codec)
+		if err != nil {
+			t.Fatalf("Marshal SPEEDTEST failed: %v", err)
+		}
+		res, err := UnmarshalSrpFrame(data, codec)
+		if err != nil {
+			t.Fatalf("Unmarshal SPEEDTEST failed: %v", err)
+		}
+		if res.SpeedTestFrame.Id != 123 || string(res.SpeedTestFrame.Payload) != "probe" {
+			t.Fatalf("SPEEDTEST mismatch")
+		}
+	}
+
+	// 2. CHANNEL_JOIN
+	{
+		f := &ProxyFrame{
+			Type: FRAME_TYPE_CHANNEL_JOIN,
+			ChannelJoinFrame: &ChannelJoinFrame{
+				SessionId: 10,
+				AuthProof: []byte("proof"),
+			},
+		}
+		data, err := MarshalSrpFrame(f, codec)
+		if err != nil {
+			t.Fatalf("Marshal CHANNEL_JOIN failed: %v", err)
+		}
+		res, err := UnmarshalSrpFrame(data, codec)
+		if err != nil {
+			t.Fatalf("Unmarshal CHANNEL_JOIN failed: %v", err)
+		}
+		if res.ChannelJoinFrame.SessionId != 10 {
+			t.Fatalf("CHANNEL_JOIN mismatch")
 		}
 	}
 }

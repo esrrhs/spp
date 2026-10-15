@@ -335,6 +335,19 @@ func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32
 			rtt := processPong(f, &sess.ProxyConn, s.config.ShowPing)
 			sess.noteRTT(rtt)
 
+		case FRAME_TYPE_SPEEDTEST:
+			s.processSpeedTest(f, sess)
+
+		case FRAME_TYPE_CHANNEL_JOIN:
+			rf := &ProxyFrame{
+				Type: FRAME_TYPE_CHANNEL_JOIN_RSP,
+				ChannelJoinRspFrame: &ChannelJoinRspFrame{
+					Ret: false,
+					Msg: "multipath deprecated",
+				},
+			}
+			sess.SendFrame(rf)
+
 		case FRAME_TYPE_DATA, FRAME_TYPE_OPEN, FRAME_TYPE_OPENRSP, FRAME_TYPE_CLOSE:
 			if sess.isEstablished() {
 				sess.deliverBusiness(f)
@@ -349,6 +362,23 @@ func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32
 	}
 	loggo.Info("processConn end %s", sess.conn.Info())
 	return nil
+}
+
+func (s *Server) processSpeedTest(f *ProxyFrame, sess *ClientConn) {
+	st := f.SpeedTestFrame
+	if st == nil || st.Echo {
+		return
+	}
+	echo := &ProxyFrame{
+		Type: FRAME_TYPE_SPEEDTEST,
+		SpeedTestFrame: &SpeedTestFrame{
+			Id:       st.Id,
+			SendTime: st.SendTime,
+			Payload:  st.Payload,
+			Echo:     true,
+		},
+	}
+	sess.SendFrame(echo)
 }
 
 func (s *Server) processLogin(f *ProxyFrame, sess *ClientConn) {
