@@ -32,6 +32,16 @@ mkdir -p "$BIN_DIR" "$LOG_DIR" "$PROF_DIR"
 
 log() { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 
+# Detach a background process into its own session so the stack survives the
+# script. Linux has setsid; macOS does not, so fall back to nohup.
+spawn_bg() {
+  if command -v setsid >/dev/null 2>&1; then
+    setsid "$@"
+  else
+    nohup "$@"
+  fi
+}
+
 kill_port_users() {
   local port="$1"
   if command -v fuser >/dev/null 2>&1; then
@@ -101,12 +111,12 @@ start_stack() {
   : > "$OUT_DIR/pids"
 
   log "start backend mode=$backend_mode :$BACKEND_PORT"
-  setsid "$BACKEND_BIN" -addr "127.0.0.1:${BACKEND_PORT}" -mode "$backend_mode" \
+  spawn_bg "$BACKEND_BIN" -addr "127.0.0.1:${BACKEND_PORT}" -mode "$backend_mode" \
     </dev/null >"$LOG_DIR/backend.log" 2>&1 &
   echo $! >> "$OUT_DIR/pids"
 
   log "start spp server proto=$PROTO compress=$COMPRESS encrypt=$ENCRYPT"
-  setsid "$SPP_BIN" \
+  spawn_bg "$SPP_BIN" \
     -type server \
     -listen ":${SERVER_PORT}" \
     -proto "$PROTO" \
@@ -119,7 +129,7 @@ start_stack() {
   echo $! >> "$OUT_DIR/pids"
 
   log "start socks5_client :$SOCKS_PORT -> server :$SERVER_PORT"
-  setsid "$SPP_BIN" \
+  spawn_bg "$SPP_BIN" \
     -type socks5_client \
     -server "127.0.0.1:${SERVER_PORT}" \
     -fromaddr ":${SOCKS_PORT}" \
