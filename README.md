@@ -6,8 +6,11 @@
 [<img src="https://img.shields.io/github/downloads/esrrhs/spp/total">](https://github.com/esrrhs/spp/releases)
 [<img src="https://img.shields.io/docker/pulls/esrrhs/spp">](https://hub.docker.com/repository/docker/esrrhs/spp)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/spp/go.yml?branch=master">](https://github.com/esrrhs/spp/actions)
+[<img src="https://img.shields.io/badge/Google_Play-Get_it_on-3DDC84?logo=googleplay&logoColor=white">](https://play.google.com/store/apps/details?id=com.esrrhs.spp.client)
 
 SPP is a versatile, high-performance network proxy and traffic-forwarding tool written in Go.
+
+📱 **Android client**: [spp_client_android](https://github.com/esrrhs/spp_client_android) — a VPN app built on SPP, available on [Google Play](https://play.google.com/store/apps/details?id=com.esrrhs.spp.client).
 
 > **Disclaimer**: This tool is intended exclusively for academic, research, and authorized testing purposes. Do not use it for unauthorized or illegal activities.
 
