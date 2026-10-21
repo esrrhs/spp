@@ -636,15 +636,36 @@ func TestRecvFrame_ControlStillJumpsAheadOfData(t *testing.T) {
 		DataFrame: &DataFrame{Id: "s1", Index: 1, Data: []byte("bulk")},
 	})
 	pc.RecvFrame(&ProxyFrame{
-		Type:       FRAME_TYPE_CLOSE,
-		CloseFrame: &CloseFrame{Id: "s1"},
+		Type:      FRAME_TYPE_OPEN,
+		OpenFrame: &OpenConnFrame{Id: "s2"},
 	})
 
 	v, closed, ok := pc.recvq.PopWait(time.Second)
 	if !ok || closed {
 		t.Fatalf("pop: ok=%v closed=%v", ok, closed)
 	}
-	if v.(*ProxyFrame).Type != FRAME_TYPE_CLOSE {
+	if v.(*ProxyFrame).Type != FRAME_TYPE_OPEN {
 		t.Fatalf("control should still jump ahead of DATA, got %v", v.(*ProxyFrame).Type)
+	}
+}
+
+func TestRecvFrame_CloseKeepsFIFOWithData(t *testing.T) {
+	pc := &ProxyConn{recvq: newPrioQueue(16)}
+	pc.RecvFrame(&ProxyFrame{
+		Type:      FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{Id: "s1", Index: 1, Data: []byte("bulk")},
+	})
+	pc.RecvFrame(&ProxyFrame{
+		Type:       FRAME_TYPE_CLOSE,
+		CloseFrame: &CloseFrame{Id: "s1"},
+	})
+
+	v1, closed, ok := pc.recvq.PopWait(time.Second)
+	if !ok || closed || v1.(*ProxyFrame).Type != FRAME_TYPE_DATA {
+		t.Fatalf("first frame should be DATA, got %v", v1)
+	}
+	v2, closed, ok := pc.recvq.PopWait(time.Second)
+	if !ok || closed || v2.(*ProxyFrame).Type != FRAME_TYPE_CLOSE {
+		t.Fatalf("second frame should be CLOSE, got %v", v2)
 	}
 }

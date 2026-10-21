@@ -73,7 +73,7 @@ func (c *ClientConn) appendOutput(out *Outputer) {
 // deliverBusiness pushes a wire frame into the business queue.
 func (c *ClientConn) deliverBusiness(f *ProxyFrame) {
 	prio := prioControl
-	if f.Type == FRAME_TYPE_DATA {
+	if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
 	c.bizq.Push(f, prio)
