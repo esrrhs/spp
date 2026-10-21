@@ -304,7 +304,7 @@ func (p *ProxyConn) pickRecvCh() *msgChannel {
 func (p *ProxyConn) SendFrame(f *ProxyFrame) {
 	if q := p.pickSendQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -338,7 +338,7 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
