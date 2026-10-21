@@ -424,3 +424,23 @@ func TestPrioQueue_SustainedStreamBoundedCapacity(t *testing.T) {
 	}
 }
 
+func TestMsgChannel_ReadWaitDrainsAfterClose(t *testing.T) {
+	ch := newMsgChannel(4)
+	ch.Write("a")
+	ch.Write("b")
+	ch.Write("c")
+	ch.Close()
+
+	var got []string
+	for {
+		v, ok := ch.ReadWait()
+		if !ok {
+			break
+		}
+		got = append(got, v.(string))
+	}
+	if len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+		t.Fatalf("ReadWait failed to drain after Close: got %v, want [a b c]", got)
+	}
+}
+

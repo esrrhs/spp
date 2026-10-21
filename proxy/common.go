@@ -492,6 +492,8 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			return err
 		}
 
+		atomic.StoreInt32(&proxyconn.pinged, 0)
+
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("recvFrom %s %s", conn.Info(), f.Type.String())
 			if f.Type == FRAME_TYPE_DATA {
@@ -682,14 +684,9 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
-	for !isExit(wg) {
-		var ff interface{}
-		select {
-		case ff = <-sendch.Ch():
-		case <-sendch.Done():
-			ff = nil
-		}
-		if ff == nil {
+	for {
+		ff, ok := sendch.ReadWait()
+		if !ok {
 			break
 		}
 		f := ff.(*ProxyFrame)
@@ -898,14 +895,9 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, father *ProxyConn) error {
 	loggo.Info("copySonnyRecv start %s", proxyConn.Info())
 
-	for !isExit(wg) {
-		var ff interface{}
-		select {
-		case ff = <-recvch.Ch():
-		case <-recvch.Done():
-			ff = nil
-		}
-		if ff == nil {
+	for {
+		ff, ok := recvch.ReadWait()
+		if !ok {
 			break
 		}
 		f := ff.(*ProxyFrame)

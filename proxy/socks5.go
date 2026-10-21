@@ -238,14 +238,9 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 
 				// Routine: Receive packets from SPP remote (via sendch) and send back to client via UDP
 				sonnyGroup.Go("socks5UDP toClient "+sonny.id, func() error {
-					for !sonnyGroup.IsExit() {
-						var ff interface{}
-						select {
-						case ff = <-sendch.Ch():
-						case <-sendch.Done():
-							ff = nil
-						}
-						if ff == nil {
+					for {
+						ff, ok := sendch.ReadWait()
+						if !ok {
 							break
 						}
 						f := ff.(*ProxyFrame)
