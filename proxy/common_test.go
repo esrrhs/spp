@@ -669,3 +669,20 @@ func TestRecvFrame_CloseKeepsFIFOWithData(t *testing.T) {
 		t.Fatalf("second frame should be CLOSE, got %v", v2)
 	}
 }
+
+func TestRecvFrame_PongJumpsAheadOfData(t *testing.T) {
+	pc := &ProxyConn{recvq: newPrioQueue(16)}
+	pc.RecvFrame(&ProxyFrame{
+		Type:      FRAME_TYPE_DATA,
+		DataFrame: &DataFrame{Id: "s1", Index: 1, Data: []byte("bulk")},
+	})
+	pc.RecvFrame(&ProxyFrame{
+		Type:      FRAME_TYPE_PONG,
+		PongFrame: &PongFrame{Time: 123},
+	})
+
+	v, closed, ok := pc.recvq.PopWait(time.Second)
+	if !ok || closed || v.(*ProxyFrame).Type != FRAME_TYPE_PONG {
+		t.Fatalf("PONG should jump ahead of DATA to prevent heartbeat timeout under heavy load, got %v", v)
+	}
+}
