@@ -66,6 +66,27 @@ func (c *msgChannel) Ch() <-chan interface{} {
 	return c.ch
 }
 
+// ReadWait pops the next frame from the channel, prioritizing buffered frames
+// even after Close/Done has been signaled so no trailing bytes are dropped.
+func (c *msgChannel) ReadWait() (v interface{}, ok bool) {
+	select {
+	case v = <-c.ch:
+		return v, true
+	default:
+		select {
+		case v = <-c.ch:
+			return v, true
+		case <-c.done:
+			select {
+			case v = <-c.ch:
+				return v, true
+			default:
+				return nil, false
+			}
+		}
+	}
+}
+
 // framePrio is send/recv priority on the single main-channel queue.
 // Lower value = higher priority (control jumps ahead of data).
 type framePrio int
