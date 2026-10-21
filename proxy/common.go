@@ -304,7 +304,7 @@ func (p *ProxyConn) pickRecvCh() *msgChannel {
 func (p *ProxyConn) SendFrame(f *ProxyFrame) {
 	if q := p.pickSendQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
@@ -333,11 +333,12 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 // RecvFrame enqueues a received frame; control is popped before DATA.
 // DATA must stay FIFO here: sendToSonny requires per-sonny Index order, so
 // size-based prioInter jump-ahead reorders chunks of the same TCP stream and
-// kills the connection with "index error".
+// kills the connection with "index error". Similarly, CLOSE must not overtake
+// DATA of the same stream (or premature EOF drops the tail of the payload).
 func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
-		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
+		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE || f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG {
 			prio = prioBulk
 		}
 		q.Push(f, prio)
