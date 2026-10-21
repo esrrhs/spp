@@ -59,10 +59,10 @@ func (s *ServerConn) appendOutput(out *Outputer) {
 }
 
 // deliverBusiness pushes a wire frame into the business queue. Control frames
-// keep priority; DATA stays FIFO bulk.
+// keep priority; DATA and CLOSE stay FIFO bulk so EOF doesn't overtake unread payload.
 func (s *ServerConn) deliverBusiness(f *ProxyFrame) {
 	prio := prioControl
-	if f.Type == FRAME_TYPE_DATA {
+	if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
 	s.bizq.Push(f, prio)
