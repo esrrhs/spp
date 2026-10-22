@@ -52,7 +52,7 @@ func DefaultConfig() *Config {
 		AuthTimeout:               15,
 		PingInter:                 1,
 		PingTimeoutInter:          60,
-		ConnTimeout:               180,
+		ConnTimeout:               0,
 		ConnectTimeout:            15,
 		Key:                       "",
 		Encrypt:                   "",
@@ -62,7 +62,7 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MainWriteChannelTimeoutMs: 30000,
+		MainWriteChannelTimeoutMs: 0,
 		Congestion:                "bb",
 	}
 }
@@ -349,10 +349,16 @@ func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
 	}
 }
 
-// SendSonnyData safely writes a data frame to sonny's sendch with timeout.
+// SendSonnyData safely writes a data frame to sonny's sendch.
+// If timeoutMs <= 0, it blocks until buffered or the sonny is closed (no timeout, pure backpressure).
+// If timeoutMs > 0, it waits up to timeoutMs.
 func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
 	ch := p.pickSendCh()
 	if ch == nil {
+		return true
+	}
+	if timeoutMs <= 0 {
+		ch.Write(f)
 		return true
 	}
 	return ch.WriteTimeout(f, timeoutMs)
@@ -866,6 +872,12 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 		break
 	}
 
+	if timeout <= 0 {
+		<-wg.Done()
+		loggo.Info("checkSonnyActive end %s", proxyconn.Info())
+		return nil
+	}
+
 	// 直接创建一个周期为 timeout 的 Ticker
 	activedTicker := time.NewTicker(time.Duration(timeout) * time.Second)
 	defer activedTicker.Stop()
@@ -878,7 +890,7 @@ func checkSonnyActive(wg *thread.Group, proxyconn *ProxyConn, estimeout int, tim
 			exit = true
 			break
 
-		// 2. 定时触发 Ping 逻辑
+		// 2. 定时触发检查逻辑
 		case <-activedTicker.C:
 			if atomic.LoadInt32(&proxyconn.actived) == 0 {
 				loggo.Error("checkSonnyActive timeout %s", proxyconn.Info())
