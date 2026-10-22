@@ -46,8 +46,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxMsgSize:                1024 * 1024,
-		MainBuffer:                128,
-		ConnBuffer:                32,
+		MainBuffer:                512,
+		ConnBuffer:                256,
 		EstablishedTimeout:        120,
 		AuthTimeout:               15,
 		PingInter:                 1,
@@ -62,7 +62,7 @@ func DefaultConfig() *Config {
 		ShowPing:                  false,
 		Username:                  "",
 		Password:                  "",
-		MainWriteChannelTimeoutMs: 1000,
+		MainWriteChannelTimeoutMs: 30000,
 		Congestion:                "bb",
 	}
 }
