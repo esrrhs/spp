@@ -46,8 +46,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxMsgSize:                1024 * 1024,
-		MainBuffer:                512,
-		ConnBuffer:                256,
+		MainBuffer:                128,
+		ConnBuffer:                32,
 		EstablishedTimeout:        120,
 		AuthTimeout:               15,
 		PingInter:                 1,
@@ -109,11 +109,19 @@ type ProxyConn struct {
 	sendq *prioQueue
 	recvq *prioQueue
 	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
-	sendch            *msgChannel
-	recvch            *msgChannel
-	actived           int32
-	pinged            int32
-	sentBytes         int64
+	sendch             *msgChannel
+	recvch             *msgChannel
+	actived            int32
+	pinged             int32
+	recvActive         int32 // atomic: set to 1 whenever wire bytes are received
+	sendActive         int32 // atomic: set to 1 whenever non-ping/pong wire bytes are sent
+	inRecvBackpressure int32 // atomic: set to 1 while recvFrom is blocked pushing to recvq
+	lastRecvNano       int64 // atomic: timestamp of last wire byte received
+	lastSendNano       int64 // atomic: timestamp of last non-ping/pong wire byte sent
+	pongflag           *int32
+	pongtime           *int64
+	showPing           bool
+	sentBytes          int64
 	rttNs             int64 // last PONG round-trip time (atomic, status page)
 	id                string
 	needclose         int32 // atomic bool
@@ -469,6 +477,10 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
+		now := time.Now().UnixNano()
+		atomic.StoreInt32(&proxyconn.pinged, 0)
+		atomic.StoreInt32(&proxyconn.recvActive, 1)
+		atomic.StoreInt64(&proxyconn.lastRecvNano, now)
 
 		msglen := binary.LittleEndian.Uint32(bs)
 		maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
@@ -485,6 +497,10 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
+		now = time.Now().UnixNano()
+		atomic.StoreInt32(&proxyconn.pinged, 0)
+		atomic.StoreInt32(&proxyconn.recvActive, 1)
+		atomic.StoreInt64(&proxyconn.lastRecvNano, now)
 
 		plain, err := proxyconn.openWire(ds[0:msglen])
 		if err != nil {
@@ -498,7 +514,19 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			return err
 		}
 
-		atomic.StoreInt32(&proxyconn.pinged, 0)
+		if f.Type == FRAME_TYPE_PING && proxyconn.pongflag != nil && proxyconn.pongtime != nil {
+			processPing(f, proxyconn, proxyconn.pongflag, proxyconn.pongtime)
+			atomic.AddInt32(&gState.MainRecvNum, 1)
+			atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
+			continue
+		}
+		if f.Type == FRAME_TYPE_PONG && proxyconn.pongflag != nil {
+			rtt := processPong(f, proxyconn, proxyconn.showPing)
+			proxyconn.noteRTT(rtt)
+			atomic.AddInt32(&gState.MainRecvNum, 1)
+			atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
+			continue
+		}
 
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("recvFrom %s %s", conn.Info(), f.Type.String())
@@ -514,7 +542,9 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			loggo.Debug("recvFrom start Write %s", conn.Info())
 		}
 
+		atomic.StoreInt32(&proxyconn.inRecvBackpressure, 1)
 		proxyconn.RecvFrame(f)
+		atomic.StoreInt32(&proxyconn.inRecvBackpressure, 0)
 
 		atomic.AddInt32(&gState.MainRecvNum, 1)
 		atomic.AddInt64(&gState.MainRecvSize, int64(msglen)+4)
@@ -625,6 +655,11 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 		if n != len(wire) {
 			loggo.Error("sendTo Write len fail: %s %d %d", conn.Info(), n, len(wire))
 			return errors.New("len error")
+		}
+
+		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
+			atomic.StoreInt32(&proxyconn.sendActive, 1)
+			atomic.StoreInt64(&proxyconn.lastSendNano, time.Now().UnixNano())
 		}
 
 		atomic.AddInt32(&gState.MainSendNum, 1)
@@ -788,13 +823,21 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 
 		// 2. 定时触发 Ping 逻辑
 		case <-pingTicker.C:
+			// 如果有数据收到，或者正在因为下游反压阻塞接收队列，说明通道是活的，无需发送心跳探活
+			recvAct := atomic.SwapInt32(&proxyconn.recvActive, 0)
+			inBP := atomic.LoadInt32(&proxyconn.inRecvBackpressure)
+			if recvAct > 0 || inBP > 0 {
+				atomic.StoreInt32(&proxyconn.pinged, 0)
+				continue
+			}
+
 			// 检查心跳超时逻辑
 			if atomic.LoadInt32(&proxyconn.pinged) > int32(pingintertimeout) {
 				loggo.Info("checkPingActive ping pong timeout %s", proxyconn.Info())
 				return errors.New("ping pong timeout")
 			}
 
-			// 发送心跳逻辑
+			// 仅在没有流量跑时发送心跳探活
 			atomic.AddInt32(pingflag, 1)
 			atomic.AddInt32(&proxyconn.pinged, 1)
 			if showping {
