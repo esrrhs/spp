@@ -156,10 +156,15 @@ func (i *Inputer) processOpenRspFrame(f *ProxyFrame) {
 	id := f.OpenRspFrame.Id
 	v, ok := i.sonny.Load(id)
 	if !ok {
-		loggo.Info("Inputer processOpenRspFrame no sonnny %s", id)
+		loggo.Debug("Inputer processOpenRspFrame no sonnny %s", id)
 		return
 	}
 	sonny := v.(*ProxyConn)
+	if b, fr, isWin := parseWindowUpdateMsg(f.OpenRspFrame.Msg); isWin {
+		sonny.releaseSendWindow(b, fr)
+		atomic.AddInt32(&sonny.actived, 1)
+		return
+	}
 	if f.OpenRspFrame.Ret {
 		sonny.setEstablished(true)
 		loggo.Info("Inputer processOpenRspFrame ok %s %s", id, sonny.Info())
@@ -329,11 +334,15 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 	}
 	atomic.AddInt32(&i.sonnyNum, 1)
 
-	sendch := newMsgChannel(i.config.ConnBuffer)
+	winFrames := sonnyWindowFrames(i.config.ConnBuffer)
+	sendch := newMsgChannel(winFrames + 8)
 	recvch := newMsgChannel(i.config.ConnBuffer)
 
 	proxyConn.sendch = sendch
 	proxyConn.recvch = recvch
+	if proxyConn.conn == nil || proxyConn.conn.Name() != "udp" {
+		proxyConn.initSendWindow(i.config.ConnBuffer)
+	}
 
 	wg := thread.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())
@@ -352,7 +361,7 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 	})
 
 	wg.Go("Inputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {
-		return sendToSonny(wg, sendch, proxyConn.conn, i.config.MaxMsgSize)
+		return sendToSonny(wg, proxyConn, i.father, sendch, proxyConn.conn, i.config.MaxMsgSize)
 	})
 
 	wg.Go("Inputer checkSonnyActive"+" "+proxyConn.conn.Info(), func() error {
@@ -385,6 +394,16 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 func (i *Inputer) hasSonny(id string) bool {
 	_, ok := i.sonny.Load(id)
 	return ok
+}
+
+func (i *Inputer) isInteractiveSonnyData(id string, n int) (matched bool, interactive bool) {
+	v, ok := i.sonny.Load(id)
+	if !ok {
+		return false, false
+	}
+	sonny := v.(*ProxyConn)
+	cur := atomic.AddInt64(&sonny.recvBytes, int64(n))
+	return true, cur <= INTERACTIVE_BYTES_LIMIT
 }
 
 func (i *Inputer) openConn(proxyConn *ProxyConn, targetAddr string) {
