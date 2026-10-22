@@ -59,10 +59,38 @@ func (s *ServerConn) appendOutput(out *Outputer) {
 }
 
 // deliverBusiness pushes a wire frame into the business queue. Control frames
-// keep priority; DATA and CLOSE stay FIFO bulk so EOF doesn't overtake unread payload.
+// keep priority; initial interactive DATA per sonny gets prioInter (cumulative
+// bytes <= INTERACTIVE_BYTES_LIMIT, which is monotonically non-increasing in
+// priority so frames of the same sonny are never reordered); bulk DATA and CLOSE
+// stay at prioBulk so EOF never overtakes unread payload.
 func (s *ServerConn) deliverBusiness(f *ProxyFrame) {
 	prio := prioControl
-	if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
+	if f.Type == FRAME_TYPE_DATA {
+		prio = prioBulk
+		if f.DataFrame != nil {
+			id := f.DataFrame.Id
+			n := len(f.DataFrame.Data)
+			inputs, outputs := s.serviceSnapshot()
+			for _, in := range inputs {
+				if matched, inter := in.isInteractiveSonnyData(id, n); matched {
+					if inter {
+						prio = prioInter
+					}
+					break
+				}
+			}
+			if prio == prioBulk {
+				for _, out := range outputs {
+					if matched, inter := out.isInteractiveSonnyData(id, n); matched {
+						if inter {
+							prio = prioInter
+						}
+						break
+					}
+				}
+			}
+		}
+	} else if f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
 	s.bizq.Push(f, prio)
@@ -304,7 +332,13 @@ func (c *Client) processConn(wg *thread.Group, sess *ServerConn, pongflag *int32
 			rtt := processPong(f, &sess.ProxyConn, c.config.ShowPing)
 			sess.noteRTT(rtt)
 
-		case FRAME_TYPE_DATA, FRAME_TYPE_OPEN, FRAME_TYPE_OPENRSP, FRAME_TYPE_CLOSE:
+		case FRAME_TYPE_OPEN:
+			c.processOpen(f, sess)
+
+		case FRAME_TYPE_OPENRSP:
+			c.processOpenRsp(f, sess)
+
+		case FRAME_TYPE_DATA, FRAME_TYPE_CLOSE:
 			sess.deliverBusiness(f)
 
 		default:
@@ -472,10 +506,16 @@ func (c *Client) processOpen(f *ProxyFrame, serverconn *ServerConn) {
 
 func (c *Client) processOpenRsp(f *ProxyFrame, serverconn *ServerConn) {
 	id := f.OpenRspFrame.Id
-	inputs, _ := serverconn.serviceSnapshot()
+	inputs, outputs := serverconn.serviceSnapshot()
 	for _, in := range inputs {
 		if in.hasSonny(id) {
 			in.processOpenRspFrame(f)
+			return
+		}
+	}
+	for _, out := range outputs {
+		if out.hasSonny(id) {
+			out.processOpenRspFrame(f)
 			return
 		}
 	}
