@@ -150,6 +150,32 @@ func (c *Client) Close() {
 	c.wg.Wait()
 }
 
+// HasRecentTraffic reports whether the main channel is established and has
+// both sent and received frames within the given time window (or is currently
+// experiencing receive backpressure from active traffic).
+func (c *Client) HasRecentTraffic(window time.Duration) bool {
+	if window <= 0 {
+		window = 10 * time.Second
+	}
+	c.connMu.Lock()
+	sess := c.serverconn
+	c.connMu.Unlock()
+	if sess == nil || !sess.isEstablished() {
+		return false
+	}
+	if atomic.LoadInt32(&sess.inRecvBackpressure) > 0 {
+		return true
+	}
+	now := time.Now().UnixNano()
+	lastRecv := atomic.LoadInt64(&sess.lastRecvNano)
+	lastSend := atomic.LoadInt64(&sess.lastSendNano)
+	if lastRecv <= 0 || lastSend <= 0 {
+		return false
+	}
+	winNs := window.Nanoseconds()
+	return (now-lastRecv) <= winNs && (now-lastSend) <= winNs
+}
+
 func (c *Client) connect() {
 	loggo.Info("connect start proto=%s addr=%s", c.proto, c.server)
 
@@ -216,6 +242,9 @@ func (c *Client) runOnce() {
 	var pingflag int32
 	var pongflag int32
 	var pongtime int64
+	sess.pongflag = &pongflag
+	sess.pongtime = &pongtime
+	sess.showPing = c.config.ShowPing
 
 	wg.Go("Client recvFrom "+c.proto, func() error {
 		return recvFrom(wg, &sess.ProxyConn, conn, c.config.MaxMsgSize)
