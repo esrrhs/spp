@@ -144,6 +144,12 @@ func (q *prioQueue) Done() <-chan struct{} {
 	return q.done
 }
 
+func (q *prioQueue) Wake() {
+	q.mu.Lock()
+	q.cond.Broadcast()
+	q.mu.Unlock()
+}
+
 func (q *prioQueue) limitForPrio(p framePrio) int {
 	if q.cap <= 1 {
 		return q.cap

@@ -312,3 +312,331 @@ func TestE2E_ConcurrentBulkAndInteractiveIntegrity(t *testing.T) {
 		conn.Close()
 	}
 }
+
+// startStreamVerifyServer starts a TCP target server supporting two streaming modes:
+//   - Header 'U' + uint64(totalBytes): reads totalBytes at rateBytesPerSec (0 = unthrottled),
+//     computes streaming SHA-256, and writes the 32-byte digest back to the client.
+//   - Header 'D' + uint64(totalBytes): streams totalBytes of deterministic pattern bytes
+//     to the client as fast as possible and closes the connection.
+func startStreamVerifyServer(t *testing.T, uploadReadRateBytesPerSec int64) (string, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("startStreamVerifyServer listen: %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				return
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				var hdr [9]byte
+				if _, err := io.ReadFull(conn, hdr[:]); err != nil {
+					return
+				}
+				mode := hdr[0]
+				total := int64(uint64(hdr[1])<<56 | uint64(hdr[2])<<48 | uint64(hdr[3])<<40 | uint64(hdr[4])<<32 |
+					uint64(hdr[5])<<24 | uint64(hdr[6])<<16 | uint64(hdr[7])<<8 | uint64(hdr[8]))
+				switch mode {
+				case 'U':
+					h := sha256.New()
+					buf := make([]byte, 64*1024)
+					var received int64
+					start := time.Now()
+					for received < total {
+						toRead := int64(len(buf))
+						if rem := total - received; rem < toRead {
+							toRead = rem
+						}
+						n, err := conn.Read(buf[:toRead])
+						if n > 0 {
+							_, _ = h.Write(buf[:n])
+							received += int64(n)
+							if uploadReadRateBytesPerSec > 0 {
+								expectedElapsed := time.Duration(float64(received) / float64(uploadReadRateBytesPerSec) * float64(time.Second))
+								if sleep := expectedElapsed - time.Since(start); sleep > 0 {
+									time.Sleep(sleep)
+								}
+							}
+						}
+						if err != nil {
+							return
+						}
+					}
+					sum := h.Sum(nil)
+					_, _ = conn.Write(sum)
+				case 'D':
+					chunk := make([]byte, 64*1024)
+					var sent int64
+					var seq byte
+					for sent < total {
+						toWrite := int64(len(chunk))
+						if rem := total - sent; rem < toWrite {
+							toWrite = rem
+						}
+						fillPattern(chunk[:toWrite], seq)
+						seq++
+						if _, err := conn.Write(chunk[:toWrite]); err != nil {
+							return
+						}
+						sent += toWrite
+					}
+				}
+			}(c)
+		}
+	}()
+	return ln.Addr().String(), func() {
+		close(done)
+		_ = ln.Close()
+	}
+}
+
+func putStreamHeader(mode byte, total int64) [9]byte {
+	var hdr [9]byte
+	hdr[0] = mode
+	u := uint64(total)
+	hdr[1] = byte(u >> 56)
+	hdr[2] = byte(u >> 48)
+	hdr[3] = byte(u >> 40)
+	hdr[4] = byte(u >> 32)
+	hdr[5] = byte(u >> 24)
+	hdr[6] = byte(u >> 16)
+	hdr[7] = byte(u >> 8)
+	hdr[8] = byte(u)
+	return hdr
+}
+
+// TestE2E_NarrowPipe_HeavyBackpressure verifies the "大流量 + 小水管" (large burst +
+// narrow pipe) scenario where both one-way upload and one-way download saturate
+// tight proxy queues (ConnBuffer=4, MainBuffer=8) for >2x the entire PingTimeoutInter
+// window without triggering false ping-pong timeouts or dropping trailing frames.
+func TestE2E_NarrowPipe_HeavyBackpressure(t *testing.T) {
+	const (
+		totalBytes        = 12 * 1024 * 1024 // 12 MiB
+		narrowPipeRateBps = 2 * 1024 * 1024  // 2 MiB/s -> ~6s transfer (>2x the 2s PingTimeoutInter)
+	)
+	targetAddr, stopTarget := startStreamVerifyServer(t, narrowPipeRateBps)
+	defer stopTarget()
+
+	for _, proto := range []string{"tcp", "rudp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			cfg := testConfig("narrow-pipe-secret-" + proto)
+			cfg.ConnBuffer = 4
+			cfg.MainBuffer = 8
+			cfg.PingInter = 1
+			cfg.PingTimeoutInter = 2 // 2s timeout window; 6s one-way transfer must stay alive
+			cfg.MainWriteChannelTimeoutMs = 0
+			cfg.ConnTimeout = 0
+
+			h := startSocks5Proxy(t, proto, cfg)
+			defer h.Close()
+
+			// 1. One-Way Upload (12 MiB blasted by client, digested at 2 MiB/s by target over ~6s)
+			t.Run("Upload", func(t *testing.T) {
+				conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
+
+				hdr := putStreamHeader('U', totalBytes)
+				if _, err := conn.Write(hdr[:]); err != nil {
+					t.Fatalf("write upload header: %v", err)
+				}
+
+				wantHash := sha256.New()
+				chunk := make([]byte, 64*1024)
+				var sent int64
+				var seq byte
+				for sent < totalBytes {
+					fillPattern(chunk, seq)
+					seq++
+					_, _ = wantHash.Write(chunk)
+					if _, err := conn.Write(chunk); err != nil {
+						t.Fatalf("upload write at %d/%d: %v", sent, totalBytes, err)
+					}
+					sent += int64(len(chunk))
+				}
+
+				if !h.client.HasRecentTraffic(5 * time.Second) {
+					t.Fatalf("expected HasRecentTraffic=true on client during one-way upload")
+				}
+
+				var gotSum [32]byte
+				if _, err := io.ReadFull(conn, gotSum[:]); err != nil {
+					t.Fatalf("read upload sha256 response after narrow-pipe drain: %v", err)
+				}
+				var wantSum [32]byte
+				copy(wantSum[:], wantHash.Sum(nil))
+				if gotSum != wantSum {
+					t.Fatalf("upload sha256 mismatch: got %x, want %x", gotSum, wantSum)
+				}
+			})
+
+			// 2. One-Way Download (12 MiB blasted by target + immediate close, digested at 2 MiB/s by client over ~6s)
+			t.Run("Download", func(t *testing.T) {
+				conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
+
+				hdr := putStreamHeader('D', totalBytes)
+				if _, err := conn.Write(hdr[:]); err != nil {
+					t.Fatalf("write download header: %v", err)
+				}
+
+				wantHash := sha256.New()
+				expectedChunk := make([]byte, 64*1024)
+				for i := int64(0); i < totalBytes/(64*1024); i++ {
+					fillPattern(expectedChunk, byte(i))
+					_, _ = wantHash.Write(expectedChunk)
+				}
+
+				gotHash := sha256.New()
+				buf := make([]byte, 64*1024)
+				var received int64
+				start := time.Now()
+				for received < totalBytes {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						_, _ = gotHash.Write(buf[:n])
+						received += int64(n)
+						expectedElapsed := time.Duration(float64(received) / float64(narrowPipeRateBps) * float64(time.Second))
+						if sleep := expectedElapsed - time.Since(start); sleep > 0 {
+							time.Sleep(sleep)
+						}
+					}
+					if err != nil {
+						if err == io.EOF && received == totalBytes {
+							break
+						}
+						t.Fatalf("download read at %d/%d: %v", received, totalBytes, err)
+					}
+				}
+
+				if !h.client.HasRecentTraffic(5 * time.Second) {
+					t.Fatalf("expected HasRecentTraffic=true on client during one-way download")
+				}
+
+				var gotSum, wantSum [32]byte
+				copy(gotSum[:], gotHash.Sum(nil))
+				copy(wantSum[:], wantHash.Sum(nil))
+				if gotSum != wantSum {
+					t.Fatalf("download sha256 mismatch: got %x, want %x", gotSum, wantSum)
+				}
+			})
+		})
+	}
+}
+
+// TestE2E_LargeStream_1GB_UploadAndDownload streams a full 1 GiB (1,073,741,824 bytes)
+// upload and a full 1 GiB download through a constrained proxy pipe with throttled
+// digestion so queues remain under sustained backpressure across multiple heartbeat
+// timeout windows, verifying byte-for-byte SHA-256 integrity.
+func TestE2E_LargeStream_1GB_UploadAndDownload(t *testing.T) {
+	const (
+		oneGiB            = int64(1) << 30    // 1,073,741,824 bytes (1 GiB)
+		throttleRateBps   = 220 * 1024 * 1024 // ~220 MiB/s -> ~4.7s per 1 GiB (>2x the 2s PingTimeoutInter)
+	)
+	targetAddr, stopTarget := startStreamVerifyServer(t, throttleRateBps)
+	defer stopTarget()
+
+	cfg := testConfig("large-stream-1gb-secret-ok")
+	cfg.ConnBuffer = 8
+	cfg.MainBuffer = 16
+	cfg.PingInter = 1
+	cfg.PingTimeoutInter = 2
+	cfg.MainWriteChannelTimeoutMs = 0
+	cfg.ConnTimeout = 0
+
+	h := startSocks5Proxy(t, "tcp", cfg)
+	defer h.Close()
+
+	// Precompute the deterministic 1 GiB SHA-256 once (256 distinct 64 KiB chunks repeated).
+	var patternChunks [256][]byte
+	for i := 0; i < 256; i++ {
+		b := make([]byte, 64*1024)
+		fillPattern(b, byte(i))
+		patternChunks[i] = b
+	}
+	wantHash := sha256.New()
+	totalChunks := oneGiB / (64 * 1024)
+	for i := int64(0); i < totalChunks; i++ {
+		_, _ = wantHash.Write(patternChunks[byte(i)])
+	}
+	var wantSum [32]byte
+	copy(wantSum[:], wantHash.Sum(nil))
+
+	t.Run("Upload_1GiB", func(t *testing.T) {
+		start := time.Now()
+		conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+
+		hdr := putStreamHeader('U', oneGiB)
+		if _, err := conn.Write(hdr[:]); err != nil {
+			t.Fatalf("write 1GiB upload header: %v", err)
+		}
+
+		for i := int64(0); i < totalChunks; i++ {
+			if _, err := conn.Write(patternChunks[byte(i)]); err != nil {
+				t.Fatalf("1GiB upload write at chunk %d/%d: %v", i, totalChunks, err)
+			}
+		}
+
+		var gotSum [32]byte
+		if _, err := io.ReadFull(conn, gotSum[:]); err != nil {
+			t.Fatalf("read 1GiB upload sha256 response: %v", err)
+		}
+		if gotSum != wantSum {
+			t.Fatalf("1GiB upload sha256 mismatch: got %x, want %x", gotSum, wantSum)
+		}
+		t.Logf("1GiB upload verified in %s", time.Since(start))
+	})
+
+	t.Run("Download_1GiB", func(t *testing.T) {
+		start := time.Now()
+		conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+		defer conn.Close()
+		_ = conn.SetDeadline(time.Now().Add(2 * time.Minute))
+
+		hdr := putStreamHeader('D', oneGiB)
+		if _, err := conn.Write(hdr[:]); err != nil {
+			t.Fatalf("write 1GiB download header: %v", err)
+		}
+
+		gotHash := sha256.New()
+		buf := make([]byte, 64*1024)
+		var received int64
+		for received < oneGiB {
+			n, err := conn.Read(buf)
+			if n > 0 {
+				_, _ = gotHash.Write(buf[:n])
+				received += int64(n)
+				expectedElapsed := time.Duration(float64(received) / float64(throttleRateBps) * float64(time.Second))
+				if sleep := expectedElapsed - time.Since(start); sleep > 0 {
+					time.Sleep(sleep)
+				}
+			}
+			if err != nil {
+				if err == io.EOF && received == oneGiB {
+					break
+				}
+				t.Fatalf("1GiB download read at %d/%d: %v", received, oneGiB, err)
+			}
+		}
+
+		var gotSum [32]byte
+		copy(gotSum[:], gotHash.Sum(nil))
+		if gotSum != wantSum {
+			t.Fatalf("1GiB download sha256 mismatch: got %x, want %x", gotSum, wantSum)
+		}
+		t.Logf("1GiB download verified in %s", time.Since(start))
+	})
+}
