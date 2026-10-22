@@ -202,6 +202,9 @@ func (s *Server) serveConn(sess *ClientConn) {
 	var pingflag int32
 	var pongflag int32
 	var pongtime int64
+	sess.pongflag = &pongflag
+	sess.pongtime = &pongtime
+	sess.showPing = s.config.ShowPing
 
 	wg.Go("Server recvFrom"+" "+sess.conn.Info(), func() error {
 		return recvFrom(wg, &sess.ProxyConn, sess.conn, s.config.MaxMsgSize)
