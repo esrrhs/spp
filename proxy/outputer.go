@@ -110,6 +110,29 @@ func (o *Outputer) hasSonny(id string) bool {
 	return ok
 }
 
+func (o *Outputer) processOpenRspFrame(f *ProxyFrame) {
+	id := f.OpenRspFrame.Id
+	v, ok := o.sonny.Load(id)
+	if !ok {
+		return
+	}
+	sonny := v.(*ProxyConn)
+	if b, fr, isWin := parseWindowUpdateMsg(f.OpenRspFrame.Msg); isWin {
+		sonny.releaseSendWindow(b, fr)
+		atomic.AddInt32(&sonny.actived, 1)
+	}
+}
+
+func (o *Outputer) isInteractiveSonnyData(id string, n int) (matched bool, interactive bool) {
+	v, ok := o.sonny.Load(id)
+	if !ok {
+		return false, false
+	}
+	sonny := v.(*ProxyConn)
+	cur := atomic.AddInt64(&sonny.recvBytes, int64(n))
+	return true, cur <= INTERACTIVE_BYTES_LIMIT
+}
+
 func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string, dialProto string) bool {
 
 	id := proxyconn.id
@@ -222,11 +245,15 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	}
 	atomic.AddInt32(&o.sonnyNum, 1)
 
-	sendch := newMsgChannel(o.config.ConnBuffer)
+	winFrames := sonnyWindowFrames(o.config.ConnBuffer)
+	sendch := newMsgChannel(winFrames + 8)
 	recvch := newMsgChannel(o.config.ConnBuffer)
 
 	proxyconn.sendch = sendch
 	proxyconn.recvch = recvch
+	if dialProto != "udp" {
+		proxyconn.initSendWindow(o.config.ConnBuffer)
+	}
 
 	goSafe(o.fwg, "Outputer processProxyConn"+" "+targetAddr, func() {
 		atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, 1)
@@ -264,7 +291,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dia
 	})
 
 	wg.Go("Outputer sendToSonny"+" "+proxyConn.conn.Info(), func() error {
-		return sendToSonny(wg, sendch, proxyConn.conn, o.config.MaxMsgSize)
+		return sendToSonny(wg, proxyConn, o.father, sendch, proxyConn.conn, o.config.MaxMsgSize)
 	})
 
 	wg.Go("Outputer checkSonnyActive"+" "+proxyConn.conn.Info(), func() error {

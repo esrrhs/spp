@@ -640,3 +640,112 @@ func TestE2E_LargeStream_1GB_UploadAndDownload(t *testing.T) {
 		t.Logf("1GiB download verified in %s", time.Since(start))
 	})
 }
+
+// TestE2E_InteractiveWebWhileBulkDownloadSaturatesPipe reproduces the scenario:
+// "有一个连接在下载占满了小水管，这时候新开一个连接请求google网页，就会打不开"
+// Connection 1 downloads a large stream while digesting slowly (saturating the narrow pipe).
+// While Connection 1 is saturating the pipe and queues, Connection 2 opens a new request
+// for a small webpage payload (e.g. 32 KiB) and expects a prompt response without timing out.
+func TestE2E_InteractiveWebWhileBulkDownloadSaturatesPipe(t *testing.T) {
+	const (
+		bulkBytes         = 12 * 1024 * 1024 // 12 MiB bulk download
+		narrowPipeRateBps = 1 * 1024 * 1024  // 1 MiB/s narrow pipe -> ~12s total download
+		webPageBytes      = 32 * 1024        // 32 KiB interactive webpage response
+	)
+	targetAddr, stopTarget := startStreamVerifyServer(t, narrowPipeRateBps)
+	defer stopTarget()
+
+	for _, proto := range []string{"tcp", "kcp", "rudp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			cfg := testConfig("interactive-under-bulk-" + proto)
+			cfg.ConnBuffer = 8
+			cfg.MainBuffer = 16
+			cfg.PingInter = 1
+			cfg.PingTimeoutInter = 5
+			cfg.MainWriteChannelTimeoutMs = 0
+			cfg.ConnTimeout = 0
+
+			h := startSocks5Proxy(t, proto, cfg)
+			defer h.Close()
+
+			saturatedCh := make(chan struct{})
+			bulkDoneCh := make(chan error, 1)
+
+			// Start Connection 1: bulk download saturating the narrow pipe
+			go func() {
+				conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+				defer conn.Close()
+				_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
+
+				hdr := putStreamHeader('D', bulkBytes)
+				if _, err := conn.Write(hdr[:]); err != nil {
+					bulkDoneCh <- err
+					return
+				}
+
+				buf := make([]byte, 64*1024)
+				var received int64
+				var signaled bool
+				start := time.Now()
+				for received < bulkBytes {
+					n, err := conn.Read(buf)
+					if n > 0 {
+						received += int64(n)
+						if !signaled && received >= 512*1024 {
+							signaled = true
+							close(saturatedCh)
+						}
+						expectedElapsed := time.Duration(float64(received) / float64(narrowPipeRateBps) * float64(time.Second))
+						if sleep := expectedElapsed - time.Since(start); sleep > 0 {
+							time.Sleep(sleep)
+						}
+					}
+					if err != nil {
+						if err == io.EOF && received == bulkBytes {
+							break
+						}
+						bulkDoneCh <- err
+						return
+					}
+				}
+				bulkDoneCh <- nil
+			}()
+
+			// Wait for Connection 1 to fill and saturate the pipe
+			select {
+			case <-saturatedCh:
+			case <-time.After(10 * time.Second):
+				t.Fatalf("timed out waiting for bulk download to start saturating pipe")
+			}
+			// Give 300ms for sendq/recvq/bizq/sonny.sendch to fill up completely under backpressure
+			time.Sleep(300 * time.Millisecond)
+
+			// Now open Connection 2 (simulating opening Google webpage while pipe is saturated)
+			webStart := time.Now()
+			webConn := socks5Connect(t, h.clientAddr, targetAddr, 2*time.Second)
+			defer webConn.Close()
+			_ = webConn.SetDeadline(time.Now().Add(2 * time.Second))
+
+			hdr := putStreamHeader('D', webPageBytes)
+			if _, err := webConn.Write(hdr[:]); err != nil {
+				t.Fatalf("[%s] write web request failed after %s: %v", proto, time.Since(webStart), err)
+			}
+
+			webBuf := make([]byte, webPageBytes)
+			if _, err := io.ReadFull(webConn, webBuf); err != nil {
+				t.Fatalf("[%s] read web page failed/timed out after %s while bulk download active: %v", proto, time.Since(webStart), err)
+			}
+			webElapsed := time.Since(webStart)
+			t.Logf("[%s] interactive web request completed in %s while bulk download saturated pipe", proto, webElapsed)
+			if webElapsed > 1500*time.Millisecond {
+				t.Fatalf("[%s] interactive web request took too long (%s > 1.5s)", proto, webElapsed)
+			}
+
+			if err := <-bulkDoneCh; err != nil {
+				t.Fatalf("[%s] bulk download failed: %v", proto, err)
+			}
+		})
+	}
+}
+

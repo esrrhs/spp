@@ -123,7 +123,14 @@ type ProxyConn struct {
 	pongtime           *int64
 	showPing           bool
 	sentBytes          int64
-	rttNs             int64 // last PONG round-trip time (atomic, status page)
+	recvBytes          int64
+	winMu              sync.Mutex
+	winCond            *sync.Cond
+	inFlightBytes      int64
+	inFlightFrames     int32
+	maxWinBytes        int64
+	maxWinFrames       int32
+	rttNs              int64 // last PONG round-trip time (atomic, status page)
 	id                string
 	needclose         int32 // atomic bool
 	authChallenge     []byte
@@ -205,10 +212,111 @@ func (p *ProxyConn) isEstablished() bool {
 
 func (p *ProxyConn) setNeedClose() {
 	atomic.StoreInt32(&p.needclose, 1)
+	p.wakeSendWindow()
 }
 
 func (p *ProxyConn) isNeedClose() bool {
 	return atomic.LoadInt32(&p.needclose) != 0
+}
+
+func sonnyWindowFrames(connBuf int) int {
+	w := connBuf * 2
+	if w < 16 {
+		w = 16
+	}
+	if w > 64 {
+		w = 64
+	}
+	return w
+}
+
+func (p *ProxyConn) initSendWindow(connBuf int) {
+	w := sonnyWindowFrames(connBuf)
+	p.winMu.Lock()
+	if p.winCond == nil {
+		p.winCond = sync.NewCond(&p.winMu)
+	}
+	p.maxWinFrames = int32(w)
+	p.maxWinBytes = int64(w) * MAX_CHUNK_SIZE
+	p.winMu.Unlock()
+}
+
+func (p *ProxyConn) wakeSendWindow() {
+	p.winMu.Lock()
+	if p.winCond != nil {
+		p.winCond.Broadcast()
+	}
+	p.winMu.Unlock()
+}
+
+func (p *ProxyConn) acquireSendWindow(wg *thread.Group, n int64, frames int32) bool {
+	p.winMu.Lock()
+	defer p.winMu.Unlock()
+	if p.maxWinBytes <= 0 || p.maxWinFrames <= 0 || p.winCond == nil {
+		return true
+	}
+	for !p.isClosed && atomic.LoadInt32(&p.needclose) == 0 && !isExit(wg) &&
+		(p.inFlightBytes >= p.maxWinBytes || p.inFlightFrames >= p.maxWinFrames) {
+		p.winCond.Wait()
+	}
+	if p.isClosed || atomic.LoadInt32(&p.needclose) != 0 || isExit(wg) {
+		return false
+	}
+	p.inFlightBytes += n
+	p.inFlightFrames += frames
+	return true
+}
+
+func (p *ProxyConn) releaseSendWindow(n int64, frames int32) {
+	p.winMu.Lock()
+	if p.winCond != nil {
+		p.inFlightBytes -= n
+		if p.inFlightBytes < 0 {
+			p.inFlightBytes = 0
+		}
+		p.inFlightFrames -= frames
+		if p.inFlightFrames < 0 {
+			p.inFlightFrames = 0
+		}
+		p.winCond.Broadcast()
+	}
+	p.winMu.Unlock()
+}
+
+const winMsgPrefix = "win:"
+
+func sendWindowUpdate(father *ProxyConn, id string, bytes int64, frames int32) {
+	if father == nil || id == "" || (bytes <= 0 && frames <= 0) {
+		return
+	}
+	rf := &ProxyFrame{
+		Type: FRAME_TYPE_OPENRSP,
+		OpenRspFrame: &OpenConnRspFrame{
+			Id:  id,
+			Ret: true,
+			Msg: winMsgPrefix + strconv.FormatInt(bytes, 10) + ":" + strconv.Itoa(int(frames)),
+		},
+	}
+	father.SendFrame(rf)
+}
+
+func parseWindowUpdateMsg(msg string) (bytes int64, frames int32, ok bool) {
+	if !strings.HasPrefix(msg, winMsgPrefix) {
+		return 0, 0, false
+	}
+	rest := strings.TrimPrefix(msg, winMsgPrefix)
+	parts := strings.SplitN(rest, ":", 2)
+	b, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil {
+		return 0, 0, false
+	}
+	f := int64(1)
+	if len(parts) == 2 {
+		if parsedF, err := strconv.ParseInt(parts[1], 10, 32); err == nil {
+			f = parsedF
+		}
+	}
+	return b, int32(f), true
 }
 
 func (p *ProxyConn) noteRTT(d time.Duration) {
@@ -254,8 +362,8 @@ func dialWithTimeout(conn network.Conn, addr string, timeoutSec int) (network.Co
 // CloseChannels safely closes all internal queues without racing with concurrent send/recv.
 func (p *ProxyConn) CloseChannels() {
 	p.mu.Lock()
-	defer p.mu.Unlock()
 	if p.isClosed {
+		p.mu.Unlock()
 		return
 	}
 	p.isClosed = true
@@ -271,6 +379,8 @@ func (p *ProxyConn) CloseChannels() {
 	if p.recvch != nil {
 		p.recvch.Close()
 	}
+	p.mu.Unlock()
+	p.wakeSendWindow()
 }
 
 func (p *ProxyConn) pickSendQ() *prioQueue {
@@ -694,7 +804,7 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 
 const (
 	MAX_INDEX               = 1024
-	MAX_CHUNK_SIZE          = 64 * 1024  // Chunk frames to 64KB to allow fair interleaving and prevent head-of-line blocking
+	MAX_CHUNK_SIZE          = 16 * 1024  // Chunk frames to 16KB to allow fine interleaving and prevent head-of-line blocking
 	INTERACTIVE_BYTES_LIMIT = 512 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
 )
 
@@ -749,9 +859,23 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	return nil
 }
 
-func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsgsize int) error {
+func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, sendch *msgChannel, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("sendToSonny start %s", conn.Info())
 	index := int32(0)
+	var ackedBytes int64
+	var ackedFrames int32
+	stepFrames := int32(1)
+	stepBytes := int64(MAX_CHUNK_SIZE)
+	if proxyconn != nil {
+		proxyconn.winMu.Lock()
+		if proxyconn.maxWinFrames >= 4 {
+			stepFrames = proxyconn.maxWinFrames / 4
+		}
+		if proxyconn.maxWinBytes >= 4*MAX_CHUNK_SIZE {
+			stepBytes = proxyconn.maxWinBytes / 4
+		}
+		proxyconn.winMu.Unlock()
+	}
 	for {
 		ff, ok := sendch.ReadWait()
 		if !ok {
@@ -802,12 +926,26 @@ func sendToSonny(wg *thread.Group, sendch *msgChannel, conn network.Conn, maxmsg
 			return errors.New("len error")
 		}
 
+		if proxyconn != nil {
+			atomic.AddInt32(&proxyconn.actived, 1)
+			ackedBytes += int64(n)
+			ackedFrames++
+			if ackedBytes >= stepBytes || ackedFrames >= stepFrames || len(sendch.Ch()) == 0 {
+				sendWindowUpdate(father, proxyconn.id, ackedBytes, ackedFrames)
+				ackedBytes = 0
+				ackedFrames = 0
+			}
+		}
+
 		if loggo.IsDebug() {
 			loggo.Debug("sendToSonny %s %d %s %d", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Crc, f.DataFrame.Index)
 		}
 
 		atomic.AddInt32(&gState.SendNum, 1)
 		atomic.AddInt64(&gState.SendSize, int64(len(f.DataFrame.Data)))
+	}
+	if proxyconn != nil && ackedFrames > 0 {
+		sendWindowUpdate(father, proxyconn.id, ackedBytes, ackedFrames)
 	}
 	loggo.Info("sendToSonny end %s", conn.Info())
 	return nil
@@ -1021,9 +1159,12 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 			}
 		}
 		f.DataFrame.Id = proxyConn.id
+		dataLen := len(f.DataFrame.Data)
+		if !proxyConn.acquireSendWindow(wg, int64(dataLen), 1) {
+			break
+		}
 		atomic.AddInt32(&proxyConn.actived, 1)
 
-		dataLen := len(f.DataFrame.Data)
 		dataCrc := f.DataFrame.Crc
 		curSent := atomic.AddInt64(&proxyConn.sentBytes, int64(dataLen))
 		father.SendData(f, curSent <= INTERACTIVE_BYTES_LIMIT)

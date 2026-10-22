@@ -73,7 +73,32 @@ func (c *ClientConn) appendOutput(out *Outputer) {
 // deliverBusiness pushes a wire frame into the business queue.
 func (c *ClientConn) deliverBusiness(f *ProxyFrame) {
 	prio := prioControl
-	if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
+	if f.Type == FRAME_TYPE_DATA {
+		prio = prioBulk
+		if f.DataFrame != nil {
+			id := f.DataFrame.Id
+			n := len(f.DataFrame.Data)
+			inputs, outputs := c.serviceSnapshot()
+			for _, in := range inputs {
+				if matched, inter := in.isInteractiveSonnyData(id, n); matched {
+					if inter {
+						prio = prioInter
+					}
+					break
+				}
+			}
+			if prio == prioBulk {
+				for _, out := range outputs {
+					if matched, inter := out.isInteractiveSonnyData(id, n); matched {
+						if inter {
+							prio = prioInter
+						}
+						break
+					}
+				}
+			}
+		}
+	} else if f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
 	c.bizq.Push(f, prio)
@@ -351,7 +376,17 @@ func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32
 			}
 			sess.SendFrame(rf)
 
-		case FRAME_TYPE_DATA, FRAME_TYPE_OPEN, FRAME_TYPE_OPENRSP, FRAME_TYPE_CLOSE:
+		case FRAME_TYPE_OPEN:
+			if sess.isEstablished() {
+				s.processOpen(f, sess)
+			}
+
+		case FRAME_TYPE_OPENRSP:
+			if sess.isEstablished() {
+				s.processOpenRsp(f, sess)
+			}
+
+		case FRAME_TYPE_DATA, FRAME_TYPE_CLOSE:
 			if sess.isEstablished() {
 				sess.deliverBusiness(f)
 			}
@@ -590,10 +625,16 @@ func (s *Server) processData(f *ProxyFrame, clientconn *ClientConn) {
 
 func (s *Server) processOpenRsp(f *ProxyFrame, clientconn *ClientConn) {
 	id := f.OpenRspFrame.Id
-	inputs, _ := clientconn.serviceSnapshot()
+	inputs, outputs := clientconn.serviceSnapshot()
 	for _, in := range inputs {
 		if in.hasSonny(id) {
 			in.processOpenRspFrame(f)
+			return
+		}
+	}
+	for _, out := range outputs {
+		if out.hasSonny(id) {
+			out.processOpenRspFrame(f)
 			return
 		}
 	}
