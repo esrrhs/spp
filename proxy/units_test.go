@@ -259,14 +259,14 @@ func TestOutputer_FrameRoutingUnknownAndStuckSonny(t *testing.T) {
 	o.processDataFrame(&ProxyFrame{Type: FRAME_TYPE_DATA, DataFrame: &DataFrame{Id: "x", Data: []byte("d")}})
 	o.processCloseFrame(&ProxyFrame{Type: FRAME_TYPE_CLOSE, CloseFrame: &CloseFrame{Id: "x"}})
 
-	// A sonny whose send channel is full gets flagged needclose on data.
+	// A sonny whose send channel is temporarily full is NOT flagged needclose on backpressure.
 	stuck := &ProxyConn{id: "stuck"}
 	stuck.sendch = newMsgChannel(1)
 	stuck.sendch.Write("occupant")
 	o.sonny.Store("stuck", stuck)
 	o.processDataFrame(&ProxyFrame{Type: FRAME_TYPE_DATA, DataFrame: &DataFrame{Id: "stuck", Data: []byte("d")}})
-	if !stuck.isNeedClose() {
-		t.Fatal("stuck sonny should be marked needclose")
+	if stuck.isNeedClose() {
+		t.Fatal("sonny under backpressure should NOT be marked needclose")
 	}
 
 	// Close frame for a known sonny is delivered to its channel.
@@ -341,14 +341,14 @@ func TestInputer_FrameRoutingAndOpen(t *testing.T) {
 		t.Fatalf("OPEN frame malformed: %+v", of.OpenFrame)
 	}
 
-	// Full-channel data marks the sonny needclose.
+	// Full-channel data does NOT mark the sonny needclose on backpressure.
 	stuck := &ProxyConn{id: "stuck"}
 	stuck.sendch = newMsgChannel(1)
 	stuck.sendch.Write("x")
 	in.sonny.Store("stuck", stuck)
 	in.processDataFrame(&ProxyFrame{Type: FRAME_TYPE_DATA, DataFrame: &DataFrame{Id: "stuck", Data: []byte("y")}})
-	if !stuck.isNeedClose() {
-		t.Fatal("stuck input sonny should be needclose")
+	if stuck.isNeedClose() {
+		t.Fatal("input sonny on backpressure should NOT be needclose")
 	}
 
 	atomic.StoreInt32(&in.sonnyNum, -3)

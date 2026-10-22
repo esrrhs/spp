@@ -88,10 +88,7 @@ func (o *Outputer) processDataFrame(f *ProxyFrame) {
 		return
 	}
 	sonny := v.(*ProxyConn)
-	if !sonny.SendSonnyData(f, o.config.MainWriteChannelTimeoutMs) {
-		sonny.setNeedClose()
-		loggo.Error("Outputer processDataFrame timeout sonnny %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
-	}
+	sonny.SendSonnyData(f, o.config.MainWriteChannelTimeoutMs)
 	atomic.AddInt32(&sonny.actived, 1)
 	loggo.Debug("Outputer processDataFrame %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 }
