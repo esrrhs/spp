@@ -282,7 +282,7 @@ func (o *Outputer) processProxyConn(proxyConn *ProxyConn, targetAddr string, dia
 		return copySonnyRecv(wg, recvch, proxyConn, o.father)
 	})
 
-	wg.Wait()
+	wg.Join()
 	proxyConn.closeConn()
 	if _, ok := o.sonny.LoadAndDelete(proxyConn.id); ok {
 		atomic.AddInt32(&o.sonnyNum, -1)
