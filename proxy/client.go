@@ -163,7 +163,7 @@ func (c *Client) HasRecentTraffic(window time.Duration) bool {
 	if sess == nil || !sess.isEstablished() {
 		return false
 	}
-	if atomic.LoadInt32(&sess.inRecvBackpressure) > 0 {
+	if atomic.LoadInt32(&sess.inRecvBackpressure) > 0 || atomic.LoadInt32(&sess.inSendBackpressure) > 0 {
 		return true
 	}
 	now := time.Now().UnixNano()
