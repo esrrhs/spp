@@ -370,7 +370,7 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 		return copySonnyRecv(wg, recvch, proxyConn, i.father)
 	})
 
-	wg.Wait()
+	wg.Join()
 	// Belt-and-suspenders: if all workers returned nil without Group.exit,
 	// still close the local socket (closeOnce makes this safe with exitfunc).
 	if proxyConn.conn != nil && proxyConn.conn.Name() != "udp" {
