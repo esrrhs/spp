@@ -116,6 +116,7 @@ type ProxyConn struct {
 	recvActive         int32 // atomic: set to 1 whenever wire bytes are received
 	sendActive         int32 // atomic: set to 1 whenever non-ping/pong wire bytes are sent
 	inRecvBackpressure int32 // atomic: set to 1 while recvFrom is blocked pushing to recvq
+	inSendBackpressure int32 // atomic: set to 1 while sendTo is blocked in conn.Write
 	lastRecvNano       int64 // atomic: timestamp of last wire byte received
 	lastSendNano       int64 // atomic: timestamp of last non-ping/pong wire byte sent
 	pongflag           *int32
@@ -279,6 +280,12 @@ func (p *ProxyConn) pickSendQ() *prioQueue {
 		return nil
 	}
 	return p.sendq
+}
+
+func (p *ProxyConn) wakeSendQ() {
+	if q := p.pickSendQ(); q != nil {
+		q.Wake()
+	}
 }
 
 func (p *ProxyConn) pickRecvQ() *prioQueue {
@@ -459,6 +466,24 @@ const (
 	MAX_PROTO_PACK_SIZE = 100
 )
 
+func readFullConn(conn io.Reader, buf []byte, proxyconn *ProxyConn) error {
+	offset := 0
+	for offset < len(buf) {
+		n, err := conn.Read(buf[offset:])
+		if n > 0 {
+			offset += n
+			now := time.Now().UnixNano()
+			atomic.StoreInt32(&proxyconn.pinged, 0)
+			atomic.StoreInt32(&proxyconn.recvActive, 1)
+			atomic.StoreInt64(&proxyconn.lastRecvNano, now)
+		}
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvThread, 1)
@@ -472,15 +497,11 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull len %s", conn.Info())
 		}
-		_, err := io.ReadFull(conn, bs)
+		err := readFullConn(conn, bs, proxyconn)
 		if err != nil {
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
-		now := time.Now().UnixNano()
-		atomic.StoreInt32(&proxyconn.pinged, 0)
-		atomic.StoreInt32(&proxyconn.recvActive, 1)
-		atomic.StoreInt64(&proxyconn.lastRecvNano, now)
 
 		msglen := binary.LittleEndian.Uint32(bs)
 		maxWire := uint32(maxmsgsize) + MAX_PROTO_PACK_SIZE + aeadOverhead
@@ -492,15 +513,11 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull body %s %d", conn.Info(), msglen)
 		}
-		_, err = io.ReadFull(conn, ds[0:msglen])
+		err = readFullConn(conn, ds[0:msglen], proxyconn)
 		if err != nil {
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
-		now = time.Now().UnixNano()
-		atomic.StoreInt32(&proxyconn.pinged, 0)
-		atomic.StoreInt32(&proxyconn.recvActive, 1)
-		atomic.StoreInt64(&proxyconn.lastRecvNano, now)
 
 		plain, err := proxyconn.openWire(ds[0:msglen])
 		if err != nil {
@@ -646,7 +663,11 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 		}
 		binary.LittleEndian.PutUint32(wire[:4], msglen)
 
+		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
+			atomic.StoreInt32(&proxyconn.inSendBackpressure, 1)
+		}
 		n, err := conn.Write(wire)
+		atomic.StoreInt32(&proxyconn.inSendBackpressure, 0)
 		if err != nil {
 			loggo.Info("sendTo Write fail: %s %s", conn.Info(), err.Error())
 			return err
@@ -657,9 +678,11 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			return errors.New("len error")
 		}
 
-		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
-			atomic.StoreInt32(&proxyconn.sendActive, 1)
+		if f.Type != FRAME_TYPE_PING {
 			atomic.StoreInt64(&proxyconn.lastSendNano, time.Now().UnixNano())
+			if f.Type != FRAME_TYPE_PONG {
+				atomic.StoreInt32(&proxyconn.sendActive, 1)
+			}
 		}
 
 		atomic.AddInt32(&gState.MainSendNum, 1)
@@ -687,9 +710,13 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	for !isExit(wg) {
 		msglen, err := conn.Read(ds)
 		if err != nil {
-			// Peer FIN (EOF) must non-nil-return so Group.exit closes the conn;
-			// returning nil left sockets in CLOSE-WAIT until ConnTimeout.
 			loggo.Debug("recvFromSonny Read fail: %s %s", conn.Info(), err)
+			if ch := proxyconn.pickRecvCh(); ch != nil {
+				// Close recvch so copySonnyRecv drains all already-queued frames
+				// into father.sendq before tearing down the sonny group.
+				ch.Close()
+				return nil
+			}
 			return err
 		}
 
@@ -795,19 +822,28 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 	timeoutTimer := time.NewTimer(time.Second * time.Duration(estimeout))
 	defer timeoutTimer.Stop()
 
-	select {
-	// 优先响应退出信号
-	case <-wg.Done():
-		break
+	if !proxyconn.isEstablished() {
+		estTicker := time.NewTicker(50 * time.Millisecond)
+		defer estTicker.Stop()
+		for !proxyconn.isEstablished() {
+			select {
+			// 优先响应退出信号
+			case <-wg.Done():
+				return nil
 
-	// 整体超时触发
-	case <-timeoutTimer.C:
-		if !proxyconn.isEstablished() {
-			loggo.Info("checkPingActive established timeout %s", proxyconn.Info())
-			return errors.New("established timeout")
+			case <-estTicker.C:
+
+			// 整体超时触发
+			case <-timeoutTimer.C:
+				if !proxyconn.isEstablished() {
+					loggo.Info("checkPingActive established timeout %s", proxyconn.Info())
+					return errors.New("established timeout")
+				}
+			}
 		}
-		break
+		estTicker.Stop()
 	}
+	timeoutTimer.Stop()
 
 	// 直接创建一个周期为 pinginter 的 Ticker
 	pingTicker := time.NewTicker(time.Duration(pinginter) * time.Second)
@@ -825,9 +861,19 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 		case <-pingTicker.C:
 			// 如果有数据收到，或者正在因为下游反压阻塞接收队列，说明通道是活的，无需发送心跳探活
 			recvAct := atomic.SwapInt32(&proxyconn.recvActive, 0)
-			inBP := atomic.LoadInt32(&proxyconn.inRecvBackpressure)
-			if recvAct > 0 || inBP > 0 {
+			inRecvBP := atomic.LoadInt32(&proxyconn.inRecvBackpressure)
+			sendAct := atomic.SwapInt32(&proxyconn.sendActive, 0)
+			inSendBP := atomic.LoadInt32(&proxyconn.inSendBackpressure)
+			if recvAct > 0 || inRecvBP > 0 {
 				atomic.StoreInt32(&proxyconn.pinged, 0)
+				// 单向大流量场景（例如纯上传或纯下载）：本端持续收到数据（或处于接收反压中），
+				// 但反向通道没有任何业务数据发出时，主动在空闲的反向通道回一个轻量 PONG，
+				// 让发送端也能感知“数据有来有回”，避免发送端在拥塞方向盲发 PING 导致超时。
+				if sendAct == 0 && inSendBP == 0 && proxyconn.pongflag != nil && proxyconn.pongtime != nil {
+					atomic.StoreInt64(proxyconn.pongtime, time.Now().UnixNano())
+					atomic.StoreInt32(proxyconn.pongflag, 1)
+					proxyconn.wakeSendQ()
+				}
 				continue
 			}
 
@@ -840,6 +886,7 @@ func checkPingActive(wg *thread.Group, proxyconn *ProxyConn,
 			// 仅在没有流量跑时发送心跳探活
 			atomic.AddInt32(pingflag, 1)
 			atomic.AddInt32(&proxyconn.pinged, 1)
+			proxyconn.wakeSendQ()
 			if showping {
 				loggo.Info("ping %s", proxyconn.Info())
 			}
@@ -883,11 +930,14 @@ func checkNeedClose(wg *thread.Group, proxyconn *ProxyConn) error {
 func processPing(f *ProxyFrame, proxyconn *ProxyConn, pongflag *int32, pongtime *int64) {
 	atomic.StoreInt64(pongtime, f.PingFrame.Time)
 	atomic.AddInt32(pongflag, 1)
+	proxyconn.wakeSendQ()
 }
 
 func processPong(f *ProxyFrame, proxyconn *ProxyConn, showping bool) time.Duration {
-	elapse := time.Duration(time.Now().UnixNano() - f.PongFrame.Time)
+	now := time.Now().UnixNano()
+	elapse := time.Duration(now - f.PongFrame.Time)
 	atomic.StoreInt32(&proxyconn.pinged, 0)
+	atomic.StoreInt64(&proxyconn.lastSendNano, now)
 	if showping {
 		loggo.Info("pong %s %s", proxyconn.Info(), elapse.String())
 	}
@@ -979,6 +1029,17 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 		father.SendData(f, curSent <= INTERACTIVE_BYTES_LIMIT)
 
 		loggo.Debug("copySonnyRecv %s %d %s %p", proxyConn.id, dataLen, dataCrc, f)
+	}
+	if !isExit(wg) {
+		for !isExit(wg) {
+			ch := proxyConn.pickSendCh()
+			if ch == nil || len(ch.Ch()) == 0 {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		loggo.Info("copySonnyRecv end (recv closed) %s", proxyConn.Info())
+		return errors.New("sonny recv closed")
 	}
 	loggo.Info("copySonnyRecv end %s", proxyConn.Info())
 	return nil

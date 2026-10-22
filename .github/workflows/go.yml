@@ -48,10 +48,10 @@ jobs:
 
       # FullMatrix is sharded in e2e-matrix below for clearer failures / speed.
       - name: Run Tests (with Race Detector)
-        run: go test -v -race -timeout 15m -skip 'TestE2E_FullMatrix' ./...
+        run: go test -v -race -timeout 15m -skip 'TestE2E_FullMatrix|TestE2E_LargeStream_1GB' ./...
 
       - name: Stability Gate (no race)
-        run: go test -v -timeout 10m -count=1 ./proxy/ -run 'TestE2E_(UnderlayMatrix|MixedChunk|ShortConnChurn|ConcurrentBulk|Lifecycle_|Resilience_)'
+        run: go test -v -timeout 10m -count=1 ./proxy/ -run 'TestE2E_(UnderlayMatrix|MixedChunk|ShortConnChurn|ConcurrentBulk|Lifecycle_|Resilience_|NarrowPipe|LargeStream_1GB)'
 
   e2e-netem:
     name: E2E netem loss+reorder
