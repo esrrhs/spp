@@ -864,3 +864,35 @@ func TestRouteOpenToOutput_IndexGuards(t *testing.T) {
 		t.Fatalf("dispatch got ret=%v msg=%q, want a failed OPEN", rsp.Ret, rsp.Msg)
 	}
 }
+
+func TestCheckPingActive_SkipsHeartbeatWhenTrafficActive(t *testing.T) {
+	g := newTestGroup(t)
+	pc := &ProxyConn{}
+	pc.setEstablished(true)
+	atomic.StoreInt32(&pc.recvActive, 1)
+	atomic.StoreInt32(&pc.pinged, 5)
+
+	var pingflag int32
+	done := make(chan error, 1)
+	go func() {
+		done <- checkPingActive(g, pc, 0, 1, 10, false, &pingflag)
+	}()
+
+	// Wait slightly over 1 ping interval (1s); since recvActive=1, it should
+	// reset pinged to 0 and NOT increment pingflag.
+	time.Sleep(1200 * time.Millisecond)
+	if got := atomic.LoadInt32(&pingflag); got != 0 {
+		t.Fatalf("expected pingflag=0 when recvActive=1, got %d", got)
+	}
+	if got := atomic.LoadInt32(&pc.pinged); got != 0 {
+		t.Fatalf("expected pinged reset to 0 when recvActive=1, got %d", got)
+	}
+
+	// Next tick (~1s later) has no traffic (recvActive was swapped to 0), so it should send a ping.
+	time.Sleep(1100 * time.Millisecond)
+	if got := atomic.LoadInt32(&pingflag); got < 1 {
+		t.Fatalf("expected pingflag >= 1 when idle, got %d", got)
+	}
+	g.Stop()
+	<-done
+}
