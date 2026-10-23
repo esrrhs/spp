@@ -249,17 +249,24 @@ func (p *ProxyConn) wakeSendWindow() {
 	p.winMu.Unlock()
 }
 
+// channelsClosed reads isClosed under p.mu; CloseChannels writes it there.
+func (p *ProxyConn) channelsClosed() bool {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return p.isClosed
+}
+
 func (p *ProxyConn) acquireSendWindow(wg *thread.Group, n int64, frames int32) bool {
 	p.winMu.Lock()
 	defer p.winMu.Unlock()
 	if p.maxWinBytes <= 0 || p.maxWinFrames <= 0 || p.winCond == nil {
 		return true
 	}
-	for !p.isClosed && atomic.LoadInt32(&p.needclose) == 0 && !isExit(wg) &&
+	for !p.channelsClosed() && atomic.LoadInt32(&p.needclose) == 0 && !isExit(wg) &&
 		(p.inFlightBytes >= p.maxWinBytes || p.inFlightFrames >= p.maxWinFrames) {
 		p.winCond.Wait()
 	}
-	if p.isClosed || atomic.LoadInt32(&p.needclose) != 0 || isExit(wg) {
+	if p.channelsClosed() || atomic.LoadInt32(&p.needclose) != 0 || isExit(wg) {
 		return false
 	}
 	p.inFlightBytes += n
