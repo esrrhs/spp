@@ -665,7 +665,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("recvFrom %s %s", conn.Info(), f.Type.String())
 			if f.Type == FRAME_TYPE_DATA {
-				if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
+				if f.DataFrame.Crc != "" && common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
 					loggo.Error("recvFrom crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
 					return errors.New("conn crc error")
 				}
@@ -743,7 +743,7 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
 			loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
 			if f.Type == FRAME_TYPE_DATA {
-				if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
+				if f.DataFrame.Crc != "" && common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
 					loggo.Error("sendTo crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
 					return errors.New("conn crc error")
 				}
@@ -909,7 +909,7 @@ func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, send
 		}
 
 		if loggo.IsDebug() {
-			if f.DataFrame.Crc != common.GetCrc32(f.DataFrame.Data) {
+			if f.DataFrame.Crc != "" && f.DataFrame.Crc != common.GetCrc32(f.DataFrame.Data) {
 				loggo.Error("sendToSonny crc error: %s %d %s %s", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Crc, common.GetCrc32(f.DataFrame.Data))
 				return errors.New("crc error")
 			}
@@ -1160,7 +1160,7 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 			return errors.New("conn compress error")
 		}
 		if loggo.IsDebug() {
-			if common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
+			if f.DataFrame.Crc != "" && common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
 				loggo.Error("copySonnyRecv crc error %s %s %s", proxyConn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc)
 				return errors.New("conn crc error")
 			}
