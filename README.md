@@ -6,6 +6,7 @@
 [<img src="https://img.shields.io/github/downloads/esrrhs/spp/total">](https://github.com/esrrhs/spp/releases)
 [<img src="https://img.shields.io/docker/pulls/esrrhs/spp">](https://hub.docker.com/repository/docker/esrrhs/spp)
 [<img src="https://img.shields.io/github/actions/workflow/status/esrrhs/spp/go.yml?branch=master">](https://github.com/esrrhs/spp/actions)
+[![codecov](https://codecov.io/gh/esrrhs/spp/graph/badge.svg)](https://codecov.io/gh/esrrhs/spp)
 
 SPP is a versatile, high-performance network proxy and traffic-forwarding tool written in Go.
 
