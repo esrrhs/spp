@@ -10,10 +10,6 @@
 
 SPP is a versatile, high-performance network proxy and traffic-forwarding tool written in Go.
 
-📱 **Android client**: [spp_client_android](https://github.com/esrrhs/spp_client_android) — a VPN app built on SPP, available on [Google Play](https://play.google.com/store/apps/details?id=com.esrrhs.spp.client).
-
-<a href="https://play.google.com/store/apps/details?id=com.esrrhs.spp.client"><img alt="Get it on Google Play" src="https://play.google.com/intl/en_us/badges/images/generic/en-play-badge.png" height="80"></a>
-
 > **Disclaimer**: This tool is intended exclusively for academic, research, and authorized testing purposes. Do not use it for unauthorized or illegal activities.
 
 ![image](show.png)
