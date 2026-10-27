@@ -321,17 +321,26 @@ func fillPattern(b []byte, seed byte) {
 
 func echoRoundTrip(t *testing.T, conn net.Conn, payload []byte, timeout time.Duration) {
 	t.Helper()
+	if err := echoRoundTripErr(conn, payload, timeout); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// echoRoundTripErr is echoRoundTrip for callers that distinguish transport
+// errors (retryable churn) from integrity mismatches (always fatal).
+func echoRoundTripErr(conn net.Conn, payload []byte, timeout time.Duration) error {
 	_ = conn.SetDeadline(time.Now().Add(timeout))
 	if _, err := conn.Write(payload); err != nil {
-		t.Fatalf("write: %v", err)
+		return fmt.Errorf("write: %w", err)
 	}
 	got := make([]byte, len(payload))
 	if _, err := io.ReadFull(conn, got); err != nil {
-		t.Fatalf("read: %v", err)
+		return fmt.Errorf("read: %w", err)
 	}
 	if sha256.Sum256(got) != sha256.Sum256(payload) {
-		t.Fatalf("echo integrity mismatch (len=%d)", len(payload))
+		return fmt.Errorf("echo integrity mismatch (len=%d)", len(payload))
 	}
+	return nil
 }
 
 func echoAndHash(t *testing.T, conn net.Conn, payload []byte, timeout time.Duration) [32]byte {

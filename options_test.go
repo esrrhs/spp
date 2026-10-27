@@ -54,6 +54,12 @@ func TestValidateStartup(t *testing.T) {
 		proxyproto: []string{"tcp"},
 		fromaddr:   []string{":1080"},
 	}, []string{"kcp"})
+	ok(startupOptions{ // socks5/http/reverse clients also default proto to tcp
+		typ:        "socks5_client",
+		servers:    []string{"h:1"},
+		proxyproto: []string{"tcp"},
+		fromaddr:   []string{":1080"},
+	}, []string{"tcp"})
 	ok(startupOptions{ // http client has no toaddr
 		typ:        "http_client",
 		protos:     []string{"quic"},

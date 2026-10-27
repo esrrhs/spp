@@ -138,3 +138,32 @@ func TestConfigFileKcpFecFields(t *testing.T) {
 		t.Fatalf("kcpfecparity not parsed: %+v", cfg.KcpFecParity)
 	}
 }
+
+func TestConfigGenEdges(t *testing.T) {
+	if got := defaultListenAddr("no-such-proto", 4); got != ":8892" {
+		t.Fatalf("unknown proto listen=%s", got)
+	}
+	if got := defaultServerAddr("tcp", "", 0); got != "127.0.0.1:8888" {
+		t.Fatalf("empty host server=%s", got)
+	}
+	if _, err := defaultClientConfig("not-a-client", "k", "e"); err == nil {
+		t.Fatal("expected error for unsupported client type")
+	}
+
+	parent := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(parent, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONConfig(filepath.Join(parent, "c.json"), ConfigFile{Type: "server"}, true); err == nil {
+		t.Fatal("expected mkdir failure when parent is a file")
+	}
+
+	dir := t.TempDir()
+	t.Chdir(dir)
+	if err := generateConfigs("", true); err != nil {
+		t.Fatalf("empty outdir: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, defaultGenServerFile)); err != nil {
+		t.Fatal(err)
+	}
+}

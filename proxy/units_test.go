@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -895,4 +896,153 @@ func TestCheckPingActive_SkipsHeartbeatWhenTrafficActive(t *testing.T) {
 	}
 	g.Stop()
 	<-done
+}
+
+func TestServer_ProcessConn_DispatchesControlFrames(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Key = "process-conn-key"
+	cfg.ShowPing = true
+	s := &Server{config: cfg}
+	sess := newTestClientConn(cfg)
+	wg := thread.NewGroup("processConn-dispatch", nil, nil)
+	defer func() {
+		wg.Stop()
+		_ = wg.Wait()
+	}()
+
+	done := make(chan error, 1)
+	var pongflag int32
+	var pongtime int64
+	go func() {
+		done <- s.processConn(wg, sess, &pongflag, &pongtime)
+	}()
+
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_SPEEDTEST}, prioControl)
+	sess.recvq.Push(&ProxyFrame{
+		Type:           FRAME_TYPE_SPEEDTEST,
+		SpeedTestFrame: &SpeedTestFrame{Id: 1, Echo: true},
+	}, prioControl)
+	payload := []byte("speed-payload")
+	sess.recvq.Push(&ProxyFrame{
+		Type: FRAME_TYPE_SPEEDTEST,
+		SpeedTestFrame: &SpeedTestFrame{
+			Id: 7, SendTime: 99, Payload: payload,
+		},
+	}, prioControl)
+
+	v, closed, ok := sess.sendq.PopWait(2 * time.Second)
+	if !ok || closed {
+		t.Fatalf("speedtest echo not queued (ok=%v closed=%v)", ok, closed)
+	}
+	echo := v.(*ProxyFrame)
+	if echo.Type != FRAME_TYPE_SPEEDTEST || echo.SpeedTestFrame == nil || !echo.SpeedTestFrame.Echo {
+		t.Fatalf("unexpected speedtest echo: %+v", echo)
+	}
+	if echo.SpeedTestFrame.Id != 7 || echo.SpeedTestFrame.SendTime != 99 || string(echo.SpeedTestFrame.Payload) != string(payload) {
+		t.Fatalf("echo fields: %+v", echo.SpeedTestFrame)
+	}
+
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_CHANNEL_JOIN}, prioControl)
+	v, closed, ok = sess.sendq.PopWait(2 * time.Second)
+	if !ok || closed {
+		t.Fatalf("channel join rsp not queued (ok=%v closed=%v)", ok, closed)
+	}
+	join := v.(*ProxyFrame)
+	if join.Type != FRAME_TYPE_CHANNEL_JOIN_RSP || join.ChannelJoinRspFrame == nil || join.ChannelJoinRspFrame.Ret {
+		t.Fatalf("unexpected join rsp: %+v", join.ChannelJoinRspFrame)
+	}
+	if !strings.Contains(join.ChannelJoinRspFrame.Msg, "multipath") {
+		t.Fatalf("join msg=%q", join.ChannelJoinRspFrame.Msg)
+	}
+
+	// Frames that must be ignored or logged without a reply, including
+	// business frames before the session is established.
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_AUTH_CHALLENGE}, prioControl)
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE(99)}, prioControl)
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_OPEN, OpenFrame: &OpenConnFrame{Id: "early"}}, prioControl)
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_DATA, DataFrame: &DataFrame{Id: "early"}}, prioControl)
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_PING, PingFrame: &PingFrame{Time: 1234}}, prioControl)
+	sess.recvq.Push(&ProxyFrame{Type: FRAME_TYPE_PONG, PongFrame: &PongFrame{Time: time.Now().UnixNano() - int64(time.Millisecond)}}, prioControl)
+	sess.recvq.Close()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("processConn did not return")
+	}
+	if atomic.LoadInt32(&pongflag) != 1 || atomic.LoadInt64(&pongtime) != 1234 {
+		t.Fatalf("ping not recorded flag=%d time=%d", pongflag, pongtime)
+	}
+	if sess.rtt() <= 0 {
+		t.Fatal("pong did not record an RTT")
+	}
+}
+
+func TestCheckSonnyActive_Branches(t *testing.T) {
+	t.Run("exit before establish", func(t *testing.T) {
+		wg := thread.NewGroup("sonny-exit", nil, nil)
+		wg.Stop()
+		defer wg.Wait()
+		if err := checkSonnyActive(wg, &ProxyConn{}, 30, 30); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("establish timeout", func(t *testing.T) {
+		wg := thread.NewGroup("sonny-est", nil, nil)
+		defer func() {
+			wg.Stop()
+			_ = wg.Wait()
+		}()
+		err := checkSonnyActive(wg, &ProxyConn{}, 1, 30)
+		if err == nil || !strings.Contains(err.Error(), "established timeout") {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("no idle timeout waits for exit", func(t *testing.T) {
+		wg := thread.NewGroup("sonny-noidle", nil, nil)
+		defer wg.Wait()
+		p := &ProxyConn{}
+		p.setEstablished(true)
+		go func() {
+			time.Sleep(1200 * time.Millisecond)
+			wg.Stop()
+		}()
+		if err := checkSonnyActive(wg, p, 1, 0); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("idle timeout", func(t *testing.T) {
+		wg := thread.NewGroup("sonny-idle", nil, nil)
+		defer func() {
+			wg.Stop()
+			_ = wg.Wait()
+		}()
+		p := &ProxyConn{}
+		p.setEstablished(true)
+		err := checkSonnyActive(wg, p, 1, 1)
+		if err == nil || !strings.Contains(err.Error(), "conn timeout") {
+			t.Fatalf("got %v", err)
+		}
+	})
+
+	t.Run("activity resets then exit", func(t *testing.T) {
+		wg := thread.NewGroup("sonny-active", nil, nil)
+		defer wg.Wait()
+		p := &ProxyConn{}
+		p.setEstablished(true)
+		atomic.StoreInt32(&p.actived, 1)
+		go func() {
+			time.Sleep(2400 * time.Millisecond)
+			wg.Stop()
+		}()
+		if err := checkSonnyActive(wg, p, 1, 1); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
