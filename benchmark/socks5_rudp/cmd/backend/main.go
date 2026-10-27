@@ -23,36 +23,64 @@ func main() {
 	bs := flag.Int("bs", 64*1024, "chunk size for source")
 	pageSize := flag.Int("pagesize", 100*1024, "page body size for page mode")
 	flag.Parse()
-
-	ln, err := net.Listen("tcp", *addr)
-	if err != nil {
+	// runBackend serves until the process is killed; the stop channel is only
+	// used by tests to shut it down.
+	if _, err := runBackend(*addr, *mode, *bs, *pageSize, make(chan struct{}), nil); err != nil {
 		panic(err)
 	}
-	fmt.Println("listening", *addr, "mode", *mode)
+}
+
+// runBackend listens on addr and serves mode until stop is closed. It returns
+// the bound listener address (useful with ":0") and nil on clean shutdown;
+// ready, when non-nil, is called with the bound address before serving.
+func runBackend(addr, mode string, bs, pageSize int, stop <-chan struct{}, ready func(net.Addr)) (net.Addr, error) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	defer ln.Close()
+	go func() {
+		<-stop
+		ln.Close()
+	}()
+	fmt.Println("listening", addr, "mode", mode)
+	if ready != nil {
+		ready(ln.Addr())
+	}
 
 	var bytes int64
+	printDone := make(chan struct{})
+	defer close(printDone)
 	go func() {
-		for range time.Tick(2 * time.Second) {
-			fmt.Printf("backend bytes=%.1fMB\n", float64(atomic.LoadInt64(&bytes))/1e6)
+		t := time.NewTicker(2 * time.Second)
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				fmt.Printf("backend bytes=%.1fMB\n", float64(atomic.LoadInt64(&bytes))/1e6)
+			case <-printDone:
+				return
+			}
 		}
 	}()
 
-	payload := make([]byte, *bs)
+	payload := make([]byte, bs)
 	fillPattern(payload, 0)
 
-	pageBody := make([]byte, *pageSize)
+	pageBody := make([]byte, pageSize)
 	fillPattern(pageBody, 0x5A)
 	pageSum := sha256.Sum256(pageBody)
 
 	for {
 		c, err := ln.Accept()
 		if err != nil {
-			continue
+			// Listener closed by stop: clean shutdown.
+			return ln.Addr(), nil
 		}
 		go func(conn net.Conn) {
 			defer conn.Close()
-			buf := make([]byte, *bs)
-			switch *mode {
+			buf := make([]byte, bs)
+			switch mode {
 			case "source":
 				for {
 					n, err := conn.Write(payload)

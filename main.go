@@ -130,64 +130,83 @@ func loadConfigFile(filePath string) (*ConfigFile, error) {
 	return &cfg, nil
 }
 
+// sigNotify returns the channel used to await shutdown signals; tests swap it
+// to drive graceful shutdown deterministically without real signals.
+var sigNotify = func() <-chan os.Signal {
+	ch := make(chan os.Signal, 1)
+	signal.Notify(ch, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
+	return ch
+}
+
 func main() {
 	defer common.CrashLog()
+	if code := runMain(os.Args[1:]); code != 0 {
+		os.Exit(code)
+	}
+}
 
-	showVersion := flag.Bool("version", false, "print version information")
-	showVersionShort := flag.Bool("v", false, "print version information")
-	configPath := flag.String("config", "", "path to json configuration file")
-	genconfig := flag.Bool("genconfig", false, "generate a multi-listener server config plus one client config per mode and exit")
-	outdir := flag.String("outdir", ".", "output directory for -genconfig")
-	force := flag.Bool("force", false, "overwrite existing files when using -genconfig")
+// runMain runs the CLI against the given arguments and returns the process
+// exit code (0 on success or clean usage rejection, 2 on flag parse errors,
+// 1 on genconfig failure).
+func runMain(args []string) int {
+	fs := flag.NewFlagSet(os.Args[0], flag.ContinueOnError)
+	showVersion := fs.Bool("version", false, "print version information")
+	showVersionShort := fs.Bool("v", false, "print version information")
+	configPath := fs.String("config", "", "path to json configuration file")
+	genconfig := fs.Bool("genconfig", false, "generate a multi-listener server config plus one client config per mode and exit")
+	outdir := fs.String("outdir", ".", "output directory for -genconfig")
+	force := fs.Bool("force", false, "overwrite existing files when using -genconfig")
 
-	t := flag.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
+	t := fs.String("type", "", "type: server/proxy_client/reverse_proxy_client/socks5_client/reverse_socks5_client/http_client/reverse_http_client")
 	var protos protoFlags
-	flag.Var(&protos, "proto", "main proto type (server may repeat; client takes exactly one): "+fmt.Sprintf("%v", network.SupportReliableProtos()))
+	fs.Var(&protos, "proto", "main proto type (server may repeat; client takes exactly one): "+fmt.Sprintf("%v", network.SupportReliableProtos()))
 	var proxyproto proxyprotoFlags
-	flag.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", network.SupportProtos()))
+	fs.Var(&proxyproto, "proxyproto", "proxy proto type: "+fmt.Sprintf("%v", network.SupportProtos()))
 	var listenaddrs listenAddrs
-	flag.Var(&listenaddrs, "listen", "server listen addr (repeat with -proto for multiple listeners)")
-	name := flag.String("name", "", "optional client tag for logs; empty is fine")
+	fs.Var(&listenaddrs, "listen", "server listen addr (repeat with -proto for multiple listeners)")
+	name := fs.String("name", "", "optional client tag for logs; empty is fine")
 	var servers serverAddrs
-	flag.Var(&servers, "server", "server addr (client takes exactly one)")
+	fs.Var(&servers, "server", "server addr (client takes exactly one)")
 	var fromaddr fromFlags
-	flag.Var(&fromaddr, "fromaddr", "from addr")
+	fs.Var(&fromaddr, "fromaddr", "from addr")
 	var toaddr toFlags
-	flag.Var(&toaddr, "toaddr", "to addr")
-	key := flag.String("key", "", "auth key (required)")
-	encrypt := flag.String("encrypt", "", "encrypt key, empty means encryption off")
-	encrypttype := flag.String("encrypttype", "chacha20", "encrypt type: none/aes-gcm/chacha20")
-	compress := flag.Int("compress", 128, "start compress size, 0 means off")
-	compresstype := flag.String("compresstype", "zstd", "compress type: none/zlib/zstd")
-	nolog := flag.Int("nolog", 0, "1=disable log file (combine with -noprint 1 for zero-cost log short-circuit)")
-	noprint := flag.Int("noprint", 0, "1=disable stdout log (combine with -nolog 1 for zero-cost log short-circuit)")
-	loglevel := flag.String("loglevel", "info", "log level")
-	profile := flag.Int("profile", 0, "open profile")
-	ping := flag.Bool("ping", false, "show ping")
-	username := flag.String("username", "", "socks5 username")
-	password := flag.String("password", "", "socks5 password")
-	kcpfecdata := flag.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
-	kcpfecparity := flag.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
-	statusAddr := flag.String("statusaddr", "", "HTTP health/status listen address (e.g. 127.0.0.1:6060), empty disables; serves /healthz and /status")
+	fs.Var(&toaddr, "toaddr", "to addr")
+	key := fs.String("key", "", "auth key (required)")
+	encrypt := fs.String("encrypt", "", "encrypt key, empty means encryption off")
+	encrypttype := fs.String("encrypttype", "chacha20", "encrypt type: none/aes-gcm/chacha20")
+	compress := fs.Int("compress", 128, "start compress size, 0 means off")
+	compresstype := fs.String("compresstype", "zstd", "compress type: none/zlib/zstd")
+	nolog := fs.Int("nolog", 0, "1=disable log file (combine with -noprint 1 for zero-cost log short-circuit)")
+	noprint := fs.Int("noprint", 0, "1=disable stdout log (combine with -nolog 1 for zero-cost log short-circuit)")
+	loglevel := fs.String("loglevel", "info", "log level")
+	profile := fs.Int("profile", 0, "open profile")
+	ping := fs.Bool("ping", false, "show ping")
+	username := fs.String("username", "", "socks5 username")
+	password := fs.String("password", "", "socks5 password")
+	kcpfecdata := fs.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
+	kcpfecparity := fs.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
+	statusAddr := fs.String("statusaddr", "", "HTTP health/status listen address (e.g. 127.0.0.1:6060), empty disables; serves /healthz and /status")
 
-	flag.Parse()
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 
 	if *showVersion || *showVersionShort {
 		fmt.Println(version.Full())
-		return
+		return 0
 	}
 
 	if *genconfig {
 		if err := generateConfigs(*outdir, *force); err != nil {
 			fmt.Fprintf(os.Stderr, "genconfig failed: %v\n", err)
-			os.Exit(1)
+			return 1
 		}
-		return
+		return 0
 	}
 
 	// Track which flags were explicitly set via command line
 	cliSet := make(map[string]bool)
-	flag.Visit(func(f *flag.Flag) {
+	fs.Visit(func(f *flag.Flag) {
 		cliSet[f.Name] = true
 	})
 
@@ -196,7 +215,7 @@ func main() {
 		fileCfg, err := loadConfigFile(*configPath)
 		if err != nil {
 			fmt.Printf("Error loading config file: %v\n\n", err)
-			return
+			return 0
 		}
 
 		if !cliSet["type"] && fileCfg.Type != "" {
@@ -282,8 +301,8 @@ func main() {
 	if verr != nil {
 		fmt.Println(verr.Error())
 		fmt.Println()
-		flag.Usage()
-		return
+		fs.Usage()
+		return 0
 	}
 	protos = protoFlags(normalizedProtos)
 
@@ -318,12 +337,12 @@ func main() {
 	ct, err := proxy.ParseCompressType(*compresstype)
 	if err != nil {
 		loggo.Error("invalid -compresstype: %s", err.Error())
-		return
+		return 0
 	}
 	et, err := proxy.ParseEncryptType(*encrypttype)
 	if err != nil {
 		loggo.Error("invalid -encrypttype: %s", err.Error())
-		return
+		return 0
 	}
 	config.CompressType = ct
 	config.EncryptType = et
@@ -335,7 +354,7 @@ func main() {
 	}
 	if err := proxy.ValidateConfig(config); err != nil {
 		loggo.Error("%s", err.Error())
-		return
+		return 0
 	}
 	if config.Encrypt == "" {
 		loggo.Info("encryption disabled (-encrypt empty)")
@@ -349,7 +368,7 @@ func main() {
 		s, err = proxy.NewServer(config, protos, listenaddrs)
 		if err != nil {
 			loggo.Error("main NewServer fail %s", err.Error())
-			return
+			return 0
 		}
 		loggo.Info("Server started successfully")
 	} else {
@@ -359,7 +378,7 @@ func main() {
 		c, err = proxy.NewClient(config, protos[0], servers[0], *name, clienttypestr, proxyproto, fromaddr, toaddr)
 		if err != nil {
 			loggo.Error("main NewClient fail %s", err.Error())
-			return
+			return 0
 		}
 		loggo.Info("Client started successfully")
 	}
@@ -385,13 +404,11 @@ func main() {
 			if c != nil {
 				c.Close()
 			}
-			return
+			return 0
 		}
 		statusSrv = ss
 	}
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM, syscall.SIGINT)
-	sig := <-sigCh
+	sig := <-sigNotify()
 	loggo.Info("received signal %v, shutting down...", sig)
 
 	if statusSrv != nil {
@@ -404,4 +421,5 @@ func main() {
 		c.Close()
 	}
 	loggo.Info("spp exited cleanly")
+	return 0
 }

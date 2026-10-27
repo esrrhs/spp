@@ -75,6 +75,18 @@ func fillPattern(b []byte, seed byte) {
 	}
 }
 
+// loadgenCfg groups the CLI knobs for runLoadgen.
+type loadgenCfg struct {
+	proxy    string
+	target   string
+	conns    int
+	duration time.Duration
+	chunk    int
+	reqSize  int
+	pageSize int
+	mode     string
+}
+
 func main() {
 	proxy := flag.String("proxy", "127.0.0.1:1080", "socks5 proxy")
 	target := flag.String("target", "127.0.0.1:9999", "backend target")
@@ -85,42 +97,60 @@ func main() {
 	pageSize := flag.Int("pagesize", 100*1024, "page-mode expected response body size")
 	mode := flag.String("mode", "upload", "upload|download|bidi|short|page")
 	flag.Parse()
+	runLoadgen(loadgenCfg{
+		proxy:    *proxy,
+		target:   *target,
+		conns:    *conns,
+		duration: *duration,
+		chunk:    *chunk,
+		reqSize:  *reqSize,
+		pageSize: *pageSize,
+		mode:     *mode,
+	}, make(chan struct{}))
+}
 
-	payload := make([]byte, *chunk)
+// runLoadgen drives the workload until the duration elapses or stop is closed.
+func runLoadgen(cfg loadgenCfg, stop <-chan struct{}) {
+	payload := make([]byte, cfg.chunk)
 	fillPattern(payload, 0)
-	if *mode == "short" && *chunk > 8*1024 {
+	if cfg.mode == "short" && cfg.chunk > 8*1024 {
 		payload = payload[:4*1024]
 	}
 
-	pageReq := make([]byte, *reqSize)
+	pageReq := make([]byte, cfg.reqSize)
 	fillPattern(pageReq, 0xA1)
-	wantPage := make([]byte, *pageSize)
+	wantPage := make([]byte, cfg.pageSize)
 	fillPattern(wantPage, 0x5A)
 	wantSum := sha256.Sum256(wantPage)
 
 	var totalUp, totalDown, opens, errs, bad, latSumNs, latCount int64
-	deadline := time.Now().Add(*duration)
+	deadline := time.Now().Add(cfg.duration)
 	var wg sync.WaitGroup
 
-	for i := 0; i < *conns; i++ {
+	for i := 0; i < cfg.conns; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			buf := make([]byte, 64*1024)
 			for time.Now().Before(deadline) {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				remain := time.Until(deadline)
 				if remain < 200*time.Millisecond {
 					return
 				}
 				start := time.Now()
-				c, err := socks5Dial(*proxy, *target, 5*time.Second)
+				c, err := socks5Dial(cfg.proxy, cfg.target, 5*time.Second)
 				if err != nil {
 					atomic.AddInt64(&errs, 1)
 					time.Sleep(20 * time.Millisecond)
 					continue
 				}
 
-				switch *mode {
+				switch cfg.mode {
 				case "short":
 					c.SetDeadline(time.Now().Add(5 * time.Second))
 					n, err := c.Write(payload)
@@ -262,30 +292,37 @@ func main() {
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 	startAll := time.Now()
+	printDone := make(chan struct{})
+	defer close(printDone)
 	go func() {
 		var lastUp, lastDown, lastOpens int64
 		lastT := startAll
-		for range ticker.C {
-			up := atomic.LoadInt64(&totalUp)
-			down := atomic.LoadInt64(&totalDown)
-			op := atomic.LoadInt64(&opens)
-			now := time.Now()
-			dt := now.Sub(lastT).Seconds()
-			avgLat := 0.0
-			if n := atomic.LoadInt64(&latCount); n > 0 {
-				avgLat = float64(atomic.LoadInt64(&latSumNs)) / float64(n) / 1e6
+		for {
+			select {
+			case <-ticker.C:
+				up := atomic.LoadInt64(&totalUp)
+				down := atomic.LoadInt64(&totalDown)
+				op := atomic.LoadInt64(&opens)
+				now := time.Now()
+				dt := now.Sub(lastT).Seconds()
+				avgLat := 0.0
+				if n := atomic.LoadInt64(&latCount); n > 0 {
+					avgLat = float64(atomic.LoadInt64(&latSumNs)) / float64(n) / 1e6
+				}
+				fmt.Printf("t=%.0fs opens/s=%.0f total_opens=%d up=%.2fMB/s down=%.2fMB/s errs=%d bad=%d avg_lat=%.1fms\n",
+					now.Sub(startAll).Seconds(),
+					float64(op-lastOpens)/dt,
+					op,
+					float64(up-lastUp)/dt/1e6,
+					float64(down-lastDown)/dt/1e6,
+					atomic.LoadInt64(&errs),
+					atomic.LoadInt64(&bad),
+					avgLat,
+				)
+				lastUp, lastDown, lastOpens, lastT = up, down, op, now
+			case <-printDone:
+				return
 			}
-			fmt.Printf("t=%.0fs opens/s=%.0f total_opens=%d up=%.2fMB/s down=%.2fMB/s errs=%d bad=%d avg_lat=%.1fms\n",
-				now.Sub(startAll).Seconds(),
-				float64(op-lastOpens)/dt,
-				op,
-				float64(up-lastUp)/dt/1e6,
-				float64(down-lastDown)/dt/1e6,
-				atomic.LoadInt64(&errs),
-				atomic.LoadInt64(&bad),
-				avgLat,
-			)
-			lastUp, lastDown, lastOpens, lastT = up, down, op, now
 		}
 	}()
 

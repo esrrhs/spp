@@ -361,3 +361,62 @@ func TestE2E_HTTPProxy_NoAuth(t *testing.T) {
 		t.Fatalf("Unexpected body: %s", string(body))
 	}
 }
+
+// Raw-variant requests exercise the request-line parsing branches: origin
+// form with a Host header, absolute-URI form without one, and a request with
+// no target info at all (proxy must close the conn, never wedge).
+func TestE2E_HTTPProxy_RequestFormVariants(t *testing.T) {
+	backendAddr, stopBackend := startHTTPTestBackend(t)
+	defer stopBackend()
+
+	h := startHTTPProxy(t, "tcp", testConfig("http-variants-secret"))
+	defer h.Close()
+
+	// Origin form + Host header: target comes from the Host header.
+	conn, err := net.DialTimeout("tcp", h.clientAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "GET /hello HTTP/1.0\r\nHost: %s\r\n\r\n", backendAddr)
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("origin-form request: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	conn.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "hello") {
+		t.Fatalf("origin-form status=%d body=%q", resp.StatusCode, body)
+	}
+
+	// Absolute-URI form without a Host header: target comes from the URI and
+	// the proxy synthesizes the Host header itself.
+	conn, err = net.DialTimeout("tcp", h.clientAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(conn, "GET http://%s/hello HTTP/1.0\r\n\r\n", backendAddr)
+	resp, err = http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("absolute-form request: %v", err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	conn.Close()
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "hello") {
+		t.Fatalf("absolute-form status=%d body=%q", resp.StatusCode, body)
+	}
+
+	// No target information at all: the conn must be closed promptly.
+	conn, err = net.DialTimeout("tcp", h.clientAddr, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+	fmt.Fprintf(conn, "GET /\r\n\r\n")
+	// A clean close yields nil from io.ReadAll; only a wedge (deadline) fails.
+	if _, rerr := io.ReadAll(conn); rerr != nil {
+		t.Fatalf("conn should close promptly for request without target host: %v", rerr)
+	}
+}

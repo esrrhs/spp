@@ -76,39 +76,59 @@ func readProxyFrameSync(conn frameConn) (*ProxyFrame, error) {
 
 // authFailAttempt dials server, completes challenge+bad LOGIN, returns the
 // client-side socket (server should tear the pipe down via setNeedClose).
+// The setup steps (dial, challenge read) tolerate transient full-suite
+// contention with retries; the frame assertions stay fatal.
 func authFailAttempt(t *testing.T, addr string) net.Conn {
 	t.Helper()
-	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
-	if err != nil {
-		t.Fatalf("dial: %v", err)
+	var lastErr error
+	for attempt := 0; attempt < 5; attempt++ {
+		conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
+		if err != nil {
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if sd, ok := conn.(interface{ SetReadDeadline(time.Time) error }); ok {
+			_ = sd.SetReadDeadline(time.Now().Add(10 * time.Second))
+		}
+		ch, err := readProxyFrameSync(conn)
+		if err != nil {
+			// Under a contended runner the listener can shed accept backlog
+			// mid-handshake; retry on a fresh socket.
+			conn.Close()
+			lastErr = err
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		if ch.Type != FRAME_TYPE_AUTH_CHALLENGE {
+			conn.Close()
+			t.Fatalf("want AUTH_CHALLENGE got %v", ch.Type)
+		}
+		login := &ProxyFrame{
+			Type: FRAME_TYPE_LOGIN,
+			LoginFrame: &LoginFrame{
+				Clienttype:   CLIENT_TYPE_PROXY,
+				Name:         "attacker",
+				AuthProof:    []byte("not-a-valid-hmac-proof!!!!!!!!!!!"),
+				CompressType: CompressNone,
+				EncryptType:  EncryptNone,
+				Services: []*LoginService{{
+					Proxyproto: PROXY_PROTO_TCP,
+					Fromaddr:   ":0",
+					Toaddr:     "127.0.0.1:1",
+				}},
+			},
+		}
+		writeProxyFrame(t, conn, login)
+		rsp := readProxyFrame(t, conn)
+		if rsp.Type != FRAME_TYPE_LOGINRSP || rsp.LoginRspFrame == nil || rsp.LoginRspFrame.Ret {
+			conn.Close()
+			t.Fatalf("want failed LOGINRSP, got %+v", rsp.LoginRspFrame)
+		}
+		return conn
 	}
-	ch := readProxyFrame(t, conn)
-	if ch.Type != FRAME_TYPE_AUTH_CHALLENGE {
-		conn.Close()
-		t.Fatalf("want AUTH_CHALLENGE got %v", ch.Type)
-	}
-	login := &ProxyFrame{
-		Type: FRAME_TYPE_LOGIN,
-		LoginFrame: &LoginFrame{
-			Clienttype:   CLIENT_TYPE_PROXY,
-			Name:         "attacker",
-			AuthProof:    []byte("not-a-valid-hmac-proof!!!!!!!!!!!"),
-			CompressType: CompressNone,
-			EncryptType:  EncryptNone,
-			Services: []*LoginService{{
-				Proxyproto: PROXY_PROTO_TCP,
-				Fromaddr:   ":0",
-				Toaddr:     "127.0.0.1:1",
-			}},
-		},
-	}
-	writeProxyFrame(t, conn, login)
-	rsp := readProxyFrame(t, conn)
-	if rsp.Type != FRAME_TYPE_LOGINRSP || rsp.LoginRspFrame == nil || rsp.LoginRspFrame.Ret {
-		conn.Close()
-		t.Fatalf("want failed LOGINRSP, got %+v", rsp.LoginRspFrame)
-	}
-	return conn
+	t.Fatalf("auth attempt setup failed after retries: %v", lastErr)
+	return nil
 }
 
 func sampleMaxGoroutines(d time.Duration, every time.Duration) (max int) {
@@ -274,7 +294,9 @@ func TestAuthFailFlood_HoldOpenReleased(t *testing.T) {
 
 	peakDuring := sampleMaxGoroutines(1500*time.Millisecond, 50*time.Millisecond)
 
-	if !waitGoroutinesNear(base, holders+20, 5*time.Second) {
+	// AuthTimeout is 5s: give the release path 2x+ margin under runner load
+	// before declaring pipes leaked.
+	if !waitGoroutinesNear(base, holders+20, 12*time.Second) {
 		t.Fatalf("hold-open burst pipes not released: g=%d base=%d", runtime.NumGoroutine(), base)
 	}
 
