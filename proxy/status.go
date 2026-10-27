@@ -229,5 +229,12 @@ func (s *StatusServer) Close() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	return s.httpSrv.Shutdown(ctx)
+	// Shutdown closes the tracked listener again; when Serve tracked the same
+	// listener we just closed, that second close reports net.ErrClosed — our
+	// own doing, not a shutdown failure.
+	err := s.httpSrv.Shutdown(ctx)
+	if err != nil && !errors.Is(err, net.ErrClosed) {
+		return err
+	}
+	return nil
 }
