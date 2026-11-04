@@ -127,7 +127,10 @@ func (i *Inputer) spawnSonny(name string, f func()) bool {
 	return true
 }
 
-func (i *Inputer) processDataFrame(f *ProxyFrame) {
+// processDataFrame takes the raw queue element so the pool tag survives to
+// sonny's sendch (its terminal consumer releases the buffer).
+func (i *Inputer) processDataFrame(qv interface{}) {
+	f := queueFrame(qv)
 	id := f.DataFrame.Id
 	v, ok := i.sonny.Load(id)
 	if !ok {
@@ -135,7 +138,7 @@ func (i *Inputer) processDataFrame(f *ProxyFrame) {
 		return
 	}
 	sonny := v.(*ProxyConn)
-	sonny.SendSonnyData(f, i.config.MainWriteChannelTimeoutMs)
+	sonny.SendSonnyDataRaw(qv, i.config.MainWriteChannelTimeoutMs)
 	atomic.AddInt32(&sonny.actived, 1)
 	loggo.Debug("Inputer processDataFrame %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 }
@@ -326,14 +329,9 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 
 	loggo.Info("Inputer processProxyConn start %s %s %s", proxyConn.id, proxyConn.conn.Info(), targetAddr)
 
-	_, loaded := i.sonny.LoadOrStore(proxyConn.id, proxyConn)
-	if loaded {
-		loggo.Error("Inputer processProxyConn LoadOrStore fail %s", proxyConn.id)
-		proxyConn.conn.Close()
-		return
-	}
-	atomic.AddInt32(&i.sonnyNum, 1)
-
+	// Channels and the send window are wired before the conn is published in
+	// i.sonny: registration is the happens-before edge that lets the main
+	// loop's hot path read them without a lock.
 	winFrames := sonnyWindowFrames(i.config.ConnBuffer)
 	sendch := newMsgChannel(winFrames + 8)
 	recvch := newMsgChannel(i.config.ConnBuffer)
@@ -343,6 +341,14 @@ func (i *Inputer) processProxyConn(proxyConn *ProxyConn, targetAddr string) {
 	if proxyConn.conn == nil || proxyConn.conn.Name() != "udp" {
 		proxyConn.initSendWindow(i.config.ConnBuffer)
 	}
+
+	_, loaded := i.sonny.LoadOrStore(proxyConn.id, proxyConn)
+	if loaded {
+		loggo.Error("Inputer processProxyConn LoadOrStore fail %s", proxyConn.id)
+		proxyConn.conn.Close()
+		return
+	}
+	atomic.AddInt32(&i.sonnyNum, 1)
 
 	wg := thread.NewGroup("Inputer processProxyConn"+" "+proxyConn.conn.Info(), i.fwg, func() {
 		loggo.Info("group start exit %s", proxyConn.conn.Info())

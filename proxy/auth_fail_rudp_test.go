@@ -232,6 +232,21 @@ func TestAuthFailFlood_RudpWrongKeyClients(t *testing.T) {
 	t.Logf("rudp_wrong_key clients=%d duration=%s baseline_g=%d peak_g=%d delta=%d clientNum=%d pprof=%s",
 		nClients, duration, baseG, peakG, peakG-baseG, srv.clientSize(), keepPath)
 
+	// Stop the reconnect storm and let in-flight rudp handshakes drain before
+	// tearing the server down: gohome's rudp listener publishes a sonny into
+	// its map (rudpconn.go sonny.Store) before accept() finishes wiring it
+	// (listenersonny.wg), so Server.Close() concurrent with a mid-handshake
+	// accept races on that field — an upstream gohome race that the detector
+	// flags nondeterministically. Wait until the storm has settled, then close
+	// the server against an idle listener. (Non-fatal: this is only de-flaking.)
+	for _, c := range clients {
+		c.Close()
+	}
+	if !waitGoroutinesNear(baseG, 20, 10*time.Second) {
+		t.Logf("rudp flood goroutines did not settle before Close: g=%d base=%d",
+			runtime.NumGoroutine(), baseG)
+	}
+
 	out, err := runPprofTop(profPath)
 	if err != nil {
 		t.Logf("pprof top error: %v\n%s", err, out)

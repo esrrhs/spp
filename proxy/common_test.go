@@ -403,8 +403,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.CompressType != CompressZstd {
 		t.Errorf("unexpected CompressType: %v", cfg.CompressType)
 	}
-	if cfg.EncryptType != EncryptChaCha20 {
-		t.Errorf("unexpected EncryptType: %v", cfg.EncryptType)
+	if cfg.EncryptType != DefaultEncryptType() {
+		t.Errorf("unexpected EncryptType: %v (want hardware default %v)", cfg.EncryptType, DefaultEncryptType())
 	}
 	if cfg.KcpFecDataShards != 0 || cfg.KcpFecParityShards != 0 {
 		t.Errorf("KCP FEC must default off for wire compat: data=%d parity=%d", cfg.KcpFecDataShards, cfg.KcpFecParityShards)
@@ -492,8 +492,8 @@ func TestNegotiateCodec(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Encrypt = "wire-key"
 	c, e, err := negotiateCodec(CompressUnspecified, EncryptUnspecified, cfg)
-	if err != nil || c != CompressZstd || e != EncryptChaCha20 {
-		t.Fatalf("default negotiate: c=%v e=%v err=%v", c, e, err)
+	if err != nil || c != CompressZstd || e != DefaultEncryptType() {
+		t.Fatalf("default negotiate: c=%v e=%v (want %v) err=%v", c, e, DefaultEncryptType(), err)
 	}
 	c, e, err = negotiateCodec(CompressZlib, EncryptNone, cfg)
 	if err != nil || c != CompressZlib || e != EncryptNone {

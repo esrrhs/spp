@@ -202,17 +202,21 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 					conn: nil, // remote virtual UDP conn handled via sonny channels
 				}
 				sonny.setEstablished(true)
+
+				// Channels are wired before the conn is published in i.sonny:
+				// registration is the happens-before edge that lets the main
+				// loop's hot path read them without a lock.
+				sendch := newMsgChannel(i.config.ConnBuffer)
+				recvch := newMsgChannel(i.config.ConnBuffer)
+				sonny.sendch = sendch
+				sonny.recvch = recvch
+
 				_, exists := i.sonny.LoadOrStore(sonny.id, sonny)
 				if exists {
 					loggo.Error("socks5UDP sonny ID collision: %s", sonny.id)
 					continue
 				}
 				atomic.AddInt32(&i.sonnyNum, 1)
-
-				sendch := newMsgChannel(i.config.ConnBuffer)
-				recvch := newMsgChannel(i.config.ConnBuffer)
-				sonny.sendch = sendch
-				sonny.recvch = recvch
 
 				tun = &socks5UDPTunnel{
 					proxyConn:  sonny,
@@ -243,11 +247,13 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 						if !ok {
 							break
 						}
-						f := ff.(*ProxyFrame)
+						f := queueFrame(ff)
 						if f.Type == FRAME_TYPE_CLOSE {
+							releasePooled(ff)
 							break
 						}
 						if f.DataFrame == nil || len(f.DataFrame.Data) == 0 {
+							releasePooled(ff)
 							continue
 						}
 
@@ -256,20 +262,24 @@ func (i *Inputer) handleSocks5UDPAssociate(tcpProxyConn *ProxyConn, clientTarget
 						expected := seq % MAX_INDEX
 						if f.DataFrame.Index != expected {
 							loggo.Error("socks5UDP recv index mismatch %s got=%d want=%d", sonny.id, f.DataFrame.Index, expected)
+							releasePooled(ff)
 							return errors.New("index error")
 						}
 
 						dstClient := tun.clientAddr.Load()
 						if dstClient == nil {
+							releasePooled(ff)
 							continue
 						}
 
 						pkt, err := network.Sock5PackUDP(tun.dstHost, tun.dstPort, f.DataFrame.Data)
 						if err != nil {
 							loggo.Error("socks5UDP pack error: %v", err)
+							releasePooled(ff)
 							continue
 						}
 						_, _ = udpListener.WriteToUDP(pkt, dstClient)
+						releasePooled(ff)
 						atomic.AddInt32(&gState.SendNum, 1)
 						atomic.AddInt64(&gState.SendSize, int64(len(pkt)))
 					}

@@ -80,7 +80,10 @@ func (o *Outputer) Close() {
 	o.conn.Close()
 }
 
-func (o *Outputer) processDataFrame(f *ProxyFrame) {
+// processDataFrame takes the raw queue element so the pool tag survives to
+// sonny's sendch (its terminal consumer releases the buffer).
+func (o *Outputer) processDataFrame(qv interface{}) {
+	f := queueFrame(qv)
 	id := f.DataFrame.Id
 	v, ok := o.sonny.Load(id)
 	if !ok {
@@ -88,7 +91,7 @@ func (o *Outputer) processDataFrame(f *ProxyFrame) {
 		return
 	}
 	sonny := v.(*ProxyConn)
-	sonny.SendSonnyData(f, o.config.MainWriteChannelTimeoutMs)
+	sonny.SendSonnyDataRaw(qv, o.config.MainWriteChannelTimeoutMs)
 	atomic.AddInt32(&sonny.actived, 1)
 	loggo.Debug("Outputer processDataFrame %s %d", f.DataFrame.Id, len(f.DataFrame.Data))
 }
@@ -198,7 +201,25 @@ func (o *Outputer) open(proxyconn *ProxyConn, targetAddr string, dialProto strin
 
 	loggo.Info("Outputer open Dial ok %s %s", id, targetAddr)
 
-	proxyconn.conn = conn
+	// wg.Wait returns as soon as the group takes an exit signal (see the dial
+	// guard above), so the sonny may already be torn down while the dial was
+	// in flight. Publishing p.conn here raced closeConn's read (found by
+	// -race) and would orphan the fresh socket; publish under the conn lock
+	// and treat an already torn-down sonny as a failed open.
+	proxyconn.connMu.Lock()
+	torn := proxyconn.isNeedClose() || proxyconn.channelsClosed()
+	if !torn {
+		proxyconn.conn = conn
+	}
+	proxyconn.connMu.Unlock()
+	if torn {
+		conn.Close()
+		rf.OpenRspFrame.Ret = false
+		rf.OpenRspFrame.Msg = "Dial fail " + targetAddr
+		o.father.SendFrame(rf)
+		loggo.Info("Outputer open sonny torn down during dial %s %s", id, targetAddr)
+		return false
+	}
 
 	rf.OpenRspFrame.Ret = true
 	rf.OpenRspFrame.Msg = "ok"
@@ -236,15 +257,10 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 
 	proxyconn := &ProxyConn{id: id, conn: nil}
 	proxyconn.setEstablished(true)
-	_, loaded := o.sonny.LoadOrStore(proxyconn.id, proxyconn)
-	if loaded {
-		rf.OpenRspFrame.Msg = "Conn id fail"
-		o.father.SendFrame(rf)
-		loggo.Error("Outputer processOpenFrame LoadOrStore fail %s %s", targetAddr, id)
-		return
-	}
-	atomic.AddInt32(&o.sonnyNum, 1)
 
+	// Channels and the send window are wired before the conn is published in
+	// o.sonny: registration is the happens-before edge that lets the main
+	// loop's hot path read them without a lock.
 	winFrames := sonnyWindowFrames(o.config.ConnBuffer)
 	sendch := newMsgChannel(winFrames + 8)
 	recvch := newMsgChannel(o.config.ConnBuffer)
@@ -254,6 +270,15 @@ func (o *Outputer) processOpenFrame(f *ProxyFrame) {
 	if dialProto != "udp" {
 		proxyconn.initSendWindow(o.config.ConnBuffer)
 	}
+
+	_, loaded := o.sonny.LoadOrStore(proxyconn.id, proxyconn)
+	if loaded {
+		rf.OpenRspFrame.Msg = "Conn id fail"
+		o.father.SendFrame(rf)
+		loggo.Error("Outputer processOpenFrame LoadOrStore fail %s %s", targetAddr, id)
+		return
+	}
+	atomic.AddInt32(&o.sonnyNum, 1)
 
 	goSafe(o.fwg, "Outputer processProxyConn"+" "+targetAddr, func() {
 		atomic.AddInt32(&gStateThreadNum.OutputerSonnyThread, 1)
