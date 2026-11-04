@@ -245,7 +245,7 @@ func (p *ProxyConn) initSendWindow(connBuf int) {
 		p.winCond = sync.NewCond(&p.winMu)
 	}
 	atomic.StoreInt32(&p.maxWinFrames, int32(w))
-	atomic.StoreInt64(&p.maxWinBytes, int64(w)*windowBytesPerFrame)
+	atomic.StoreInt64(&p.maxWinBytes, int64(w)*MAX_CHUNK_SIZE)
 	p.winMu.Unlock()
 }
 
@@ -1039,17 +1039,8 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 }
 
 const (
-	MAX_INDEX = 1024
-	// Chunk frames to 32KB: halves the per-frame Write syscalls on the target
-	// conn (the bulk profile showed them at ~50% of server CPU with 16KB
-	// frames, and per-sonny frame arrivals are too sparse for write batching
-	// to form). Interleaving granularity coarsens accordingly — the
-	// interactive priority still jumps between frames.
-	MAX_CHUNK_SIZE = 32 * 1024
-	// The per-sonny flow-control window bounds in-flight BYTES; freeze it at
-	// its historical 1MB (64 x the old 16KB chunk) so doubling the chunk size
-	// does not double the bufferbloat on narrow pipes.
-	windowBytesPerFrame     = 16 * 1024
+	MAX_INDEX               = 1024
+	MAX_CHUNK_SIZE          = 16 * 1024  // Chunk frames to 16KB to allow fine interleaving and prevent head-of-line blocking
 	INTERACTIVE_BYTES_LIMIT = 512 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
 )
 
