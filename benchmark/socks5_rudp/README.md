@@ -30,3 +30,19 @@ Defaults match the tuning runs:
 - bulk:  64 workers, 32KB chunks, sink backend, ~30s
 - short: 200 workers, 4KB echo (byte-exact verify), echo backend, ~25s
 - page:  100 workers, 512B req + 100KB page (len+SHA-256+bytes verify), ~20s
+
+Methodology caveat (measured on macOS, applies to any host with a ~16K
+ephemeral-port range):
+
+- Every successful short open consumes ~3 sockets that sit in TIME_WAIT
+  (~30s each); a full short run (~8K opens) exhausts the range, and the
+  NEXT run collapses to single-digit opens/s with 5s client-deadline
+  timeouts — regardless of which code tree is running (verified with a
+  self-decay experiment: identical binaries, fresh state run1=830
+  opens/s, immediately-following run2=3).
+- Comparing trees with back-to-back short runs is therefore invalid.
+  Use >=150s of cooldown between runs and take a SINGLE sample per
+  state; the collapse signature is opens/s < 100 with avg_lat > 2s
+  (fresh-state spread across trees is 746-1003 opens/s).
+- bulk/page churn few sockets and are not affected; consecutive runs
+  are comparable.
