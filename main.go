@@ -173,7 +173,7 @@ func runMain(args []string) int {
 	fs.Var(&toaddr, "toaddr", "to addr")
 	key := fs.String("key", "", "auth key (required)")
 	encrypt := fs.String("encrypt", "", "encrypt key, empty means encryption off")
-	encrypttype := fs.String("encrypttype", "chacha20", "encrypt type: none/aes-gcm/chacha20")
+	encrypttype := fs.String("encrypttype", "", "encrypt type: none/aes-gcm/chacha20 (empty = auto: aes-gcm on AES hardware, else chacha20)")
 	compress := fs.Int("compress", 128, "start compress size, 0 means off")
 	compresstype := fs.String("compresstype", "zstd", "compress type: none/zlib/zstd")
 	nolog := fs.Int("nolog", 0, "1=disable log file (combine with -noprint 1 for zero-cost log short-circuit)")
@@ -350,7 +350,7 @@ func runMain(args []string) int {
 		config.CompressType = proxy.CompressZstd
 	}
 	if et == proxy.EncryptUnspecified {
-		config.EncryptType = proxy.EncryptChaCha20
+		config.EncryptType = proxy.DefaultEncryptType()
 	}
 	if err := proxy.ValidateConfig(config); err != nil {
 		loggo.Error("%s", err.Error())
