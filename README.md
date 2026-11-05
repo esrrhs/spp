@@ -30,7 +30,6 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   - [HTTP / HTTPS Proxy (Forward & Reverse)](#http--https-proxy-forward--reverse)
   - [Cross-Protocol Tunneling (QUIC / KCP / RUDP / RICMP / RHTTP / RDNS)](#cross-protocol-tunneling-quic--kcp--rudp--ricmp--rhttp--rdns)
 - [Configuration Files](#configuration-files)
-- [Performance & Benchmark](#performance--benchmark)
 - [Health Check & Monitoring](#health-check--monitoring)
 - [Ecosystem & Plugins](#ecosystem--plugins)
 - [Documentation](#documentation)
@@ -314,22 +313,6 @@ Load the configuration file:
 ```bash
 ./spp -config client.json
 ```
-
----
-
-## Performance & Benchmark
-
-Maximum single-machine bandwidth testing with TCP proxy over various transit protocols (tested via `iperf`):
-
-| Protocol Combination | Speed (Direct) | Speed (Encrypted) | Speed (Encrypted + Compressed) |
-| :--- | :--- | :--- | :--- |
-| **Direct Connection** | 3535 MB/s | — | — |
-| **TCP Forwarding** | 663 MB/s | 225 MB/s | 23.4 MB/s |
-| **QUIC Forwarding** | 35.5 MB/s | 32.8 MB/s | 15.1 MB/s |
-| **KCP Forwarding** | 18.2 MB/s | 18.6 MB/s | 14.7 MB/s |
-| **RHTTP Forwarding** | 10.7 MB/s | 10.8 MB/s | 8.73 MB/s |
-| **RUDP Forwarding** | 5.15 MB/s | 5.81 MB/s | 5.05 MB/s |
-| **RICMP Forwarding** | 3.34 MB/s | 3.25 MB/s | 3.46 MB/s |
 
 ---
 
