@@ -4,6 +4,11 @@
 *.dll
 *.so
 *.dylib
+spp
+spp.bak.*
+*.bak
+pack/
+pack.zip
 
 # Test binary, built with `go test -c`
 *.test
