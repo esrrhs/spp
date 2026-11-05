@@ -105,7 +105,7 @@ func commonDefaults(key, encrypt string) ConfigFile {
 	return ConfigFile{
 		Key:          key,
 		Encrypt:      ptrString(encrypt),
-		EncryptType:  ptrString("chacha20"),
+		EncryptType:  ptrString(""), // runtime auto: aes-gcm on AES hardware, else chacha20
 		Compress:     ptrInt(128),
 		CompressType: ptrString("zstd"),
 		LogLevel:     "info",

@@ -63,7 +63,8 @@ func (s *ServerConn) appendOutput(out *Outputer) {
 // bytes <= INTERACTIVE_BYTES_LIMIT, which is monotonically non-increasing in
 // priority so frames of the same sonny are never reordered); bulk DATA and CLOSE
 // stay at prioBulk so EOF never overtakes unread payload.
-func (s *ServerConn) deliverBusiness(f *ProxyFrame) {
+func (s *ServerConn) deliverBusiness(qv interface{}) {
+	f := queueFrame(qv)
 	prio := prioControl
 	if f.Type == FRAME_TYPE_DATA {
 		prio = prioBulk
@@ -93,7 +94,7 @@ func (s *ServerConn) deliverBusiness(f *ProxyFrame) {
 	} else if f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
-	s.bizq.Push(f, prio)
+	s.bizq.Push(qv, prio)
 }
 
 type Client struct {
@@ -316,7 +317,7 @@ func (c *Client) processConn(wg *thread.Group, sess *ServerConn, pongflag *int32
 			}
 			continue
 		}
-		f := v.(*ProxyFrame)
+		f := queueFrame(v)
 
 		switch f.Type {
 		case FRAME_TYPE_AUTH_CHALLENGE:
@@ -339,7 +340,7 @@ func (c *Client) processConn(wg *thread.Group, sess *ServerConn, pongflag *int32
 			c.processOpenRsp(f, sess)
 
 		case FRAME_TYPE_DATA, FRAME_TYPE_CLOSE:
-			sess.deliverBusiness(f)
+			sess.deliverBusiness(v)
 
 		default:
 			loggo.Error("processConn unexpected %s on %s", f.Type.String(), c.proto)
@@ -429,10 +430,10 @@ func (c *Client) processSession(wg *thread.Group, sess *ServerConn) {
 			}
 			continue
 		}
-		f := v.(*ProxyFrame)
+		f := queueFrame(v)
 		switch f.Type {
 		case FRAME_TYPE_DATA:
-			c.processData(f, sess)
+			c.processData(v, sess)
 		case FRAME_TYPE_OPEN:
 			c.processOpen(f, sess)
 		case FRAME_TYPE_OPENRSP:
@@ -482,18 +483,21 @@ func (c *Client) iniService(wg *thread.Group, serverConn *ServerConn) error {
 	return nil
 }
 
-func (c *Client) processData(f *ProxyFrame, serverconn *ServerConn) {
+// processData takes the raw queue element so the pool tag survives to the
+// sonny sendch terminal.
+func (c *Client) processData(qv interface{}, serverconn *ServerConn) {
+	f := queueFrame(qv)
 	id := f.DataFrame.Id
 	inputs, outputs := serverconn.serviceSnapshot()
 	for _, in := range inputs {
 		if in.hasSonny(id) {
-			in.processDataFrame(f)
+			in.processDataFrame(qv)
 			return
 		}
 	}
 	for _, out := range outputs {
 		if out.hasSonny(id) {
-			out.processDataFrame(f)
+			out.processDataFrame(qv)
 			return
 		}
 	}

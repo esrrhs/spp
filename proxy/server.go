@@ -71,7 +71,8 @@ func (c *ClientConn) appendOutput(out *Outputer) {
 }
 
 // deliverBusiness pushes a wire frame into the business queue.
-func (c *ClientConn) deliverBusiness(f *ProxyFrame) {
+func (c *ClientConn) deliverBusiness(qv interface{}) {
+	f := queueFrame(qv)
 	prio := prioControl
 	if f.Type == FRAME_TYPE_DATA {
 		prio = prioBulk
@@ -101,7 +102,7 @@ func (c *ClientConn) deliverBusiness(f *ProxyFrame) {
 	} else if f.Type == FRAME_TYPE_CLOSE {
 		prio = prioBulk
 	}
-	c.bizq.Push(f, prio)
+	c.bizq.Push(qv, prio)
 }
 
 type Server struct {
@@ -350,7 +351,7 @@ func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32
 			}
 			continue
 		}
-		f := v.(*ProxyFrame)
+		f := queueFrame(v)
 
 		switch f.Type {
 		case FRAME_TYPE_LOGIN:
@@ -388,7 +389,7 @@ func (s *Server) processConn(wg *thread.Group, sess *ClientConn, pongflag *int32
 
 		case FRAME_TYPE_DATA, FRAME_TYPE_CLOSE:
 			if sess.isEstablished() {
-				sess.deliverBusiness(f)
+				sess.deliverBusiness(v)
 			}
 
 		case FRAME_TYPE_AUTH_CHALLENGE:
@@ -521,10 +522,10 @@ func (s *Server) processSession(wg *thread.Group, sess *ClientConn) {
 			}
 			continue
 		}
-		f := v.(*ProxyFrame)
+		f := queueFrame(v)
 		switch f.Type {
 		case FRAME_TYPE_DATA:
-			s.processData(f, sess)
+			s.processData(v, sess)
 		case FRAME_TYPE_OPEN:
 			s.processOpen(f, sess)
 		case FRAME_TYPE_OPENRSP:
@@ -606,18 +607,21 @@ func (s *Server) iniService(wg *thread.Group, f *ProxyFrame, clientConn *ClientC
 	return nil
 }
 
-func (s *Server) processData(f *ProxyFrame, clientconn *ClientConn) {
+// processData takes the raw queue element so the pool tag survives to the
+// sonny sendch terminal.
+func (s *Server) processData(qv interface{}, clientconn *ClientConn) {
+	f := queueFrame(qv)
 	id := f.DataFrame.Id
 	inputs, outputs := clientconn.serviceSnapshot()
 	for _, in := range inputs {
 		if in.hasSonny(id) {
-			in.processDataFrame(f)
+			in.processDataFrame(qv)
 			return
 		}
 	}
 	for _, out := range outputs {
 		if out.hasSonny(id) {
-			out.processDataFrame(f)
+			out.processDataFrame(qv)
 			return
 		}
 	}

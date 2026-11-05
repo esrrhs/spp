@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"net"
 	"strings"
-	"sync/atomic"
 	"testing"
 
 	"github.com/esrrhs/gohome/thread"
@@ -22,8 +21,8 @@ func TestDefaultFrameCodec_AllBranches(t *testing.T) {
 	if c.CompressType != CompressZstd {
 		t.Fatalf("unspecified compress should default to zstd, got %v", c.CompressType)
 	}
-	if c.EncryptType != EncryptChaCha20 {
-		t.Fatalf("unspecified encrypt should default to chacha20, got %v", c.EncryptType)
+	if c.EncryptType != DefaultEncryptType() {
+		t.Fatalf("unspecified encrypt should default to the hardware AEAD (%v), got %v", DefaultEncryptType(), c.EncryptType)
 	}
 
 	cfg.Compress = 0
@@ -67,8 +66,9 @@ func TestNewAEAD_KeyErrors(t *testing.T) {
 
 func TestSealOpenWire_AeadNotInitialized(t *testing.T) {
 	p := &ProxyConn{}
-	p.encryptKey = "wire-secret"
-	atomic.StoreInt32(&p.encryptType, int32(EncryptAESGCM))
+	// A snapshot with the key set but aead nil models the setCodec path where
+	// AEAD init failed; seal/open must refuse instead of sending plaintext.
+	p.codec.Store(&sessionCodec{encryptKey: "wire-secret", encryptType: EncryptAESGCM})
 	if _, err := p.sealWire([]byte("x")); err == nil {
 		t.Fatal("expected sealWire AEAD-not-initialized error")
 	}

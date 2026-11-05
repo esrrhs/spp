@@ -66,6 +66,16 @@ func (c *msgChannel) Ch() <-chan interface{} {
 	return c.ch
 }
 
+// TryReadWait pops without blocking: ok=false when empty.
+func (c *msgChannel) TryReadWait() (v interface{}, ok bool) {
+	select {
+	case v = <-c.ch:
+		return v, true
+	default:
+		return nil, false
+	}
+}
+
 // ReadWait pops the next frame from the channel, prioritizing buffered frames
 // even after Close/Done has been signaled so no trailing bytes are dropped.
 func (c *msgChannel) ReadWait() (v interface{}, ok bool) {
@@ -101,13 +111,20 @@ const (
 // prioQueue is a single bounded queue with priority pop (插队).
 // One shared capacity matches the single underlying main pipe (rudp/ricmp/...).
 type prioQueue struct {
-	mu     sync.Mutex
-	cond   *sync.Cond
-	cap    int
-	size   int
-	closed bool
-	done   chan struct{}
-	q      [prioCount][]interface{}
+	mu sync.Mutex
+	// popCond wakes the consumer; pushCond[p] wakes one blocked pusher of
+	// priority p. Separate conds let PopWait hand each freed slot to exactly
+	// one waiter per priority instead of Broadcast, which used to wake every
+	// blocked pusher on every pop — a thundering herd on the client, where
+	// every sonny's copySonnyRecv pushes into the one shared main-channel
+	// queue and stays blocked whenever it fills up under backpressure.
+	popCond  *sync.Cond
+	pushCond [prioCount]*sync.Cond
+	cap      int
+	size     int
+	closed   bool
+	done     chan struct{}
+	q        [prioCount][]interface{}
 	// head is the consume position per priority. Popping used to reslice
 	// (q[i] = q[i][1:]), which leaves the backing array's capacity behind at
 	// the new start: the very next append then reallocates and copies the
@@ -125,8 +142,20 @@ func newPrioQueue(n int) *prioQueue {
 		cap:  n,
 		done: make(chan struct{}),
 	}
-	pq.cond = sync.NewCond(&pq.mu)
+	pq.popCond = sync.NewCond(&pq.mu)
+	for i := range pq.pushCond {
+		pq.pushCond[i] = sync.NewCond(&pq.mu)
+	}
 	return pq
+}
+
+// broadcastAllLocked wakes every waiter. All conds share q.mu, so callers
+// must hold it.
+func (q *prioQueue) broadcastAllLocked() {
+	q.popCond.Broadcast()
+	for i := range q.pushCond {
+		q.pushCond[i].Broadcast()
+	}
 }
 
 func (q *prioQueue) Close() {
@@ -137,7 +166,7 @@ func (q *prioQueue) Close() {
 	}
 	q.closed = true
 	close(q.done)
-	q.cond.Broadcast()
+	q.broadcastAllLocked()
 }
 
 func (q *prioQueue) Done() <-chan struct{} {
@@ -146,7 +175,7 @@ func (q *prioQueue) Done() <-chan struct{} {
 
 func (q *prioQueue) Wake() {
 	q.mu.Lock()
-	q.cond.Broadcast()
+	q.broadcastAllLocked()
 	q.mu.Unlock()
 }
 
@@ -182,7 +211,7 @@ func (q *prioQueue) pushItemLocked(v interface{}, p framePrio) {
 	}
 	q.q[p] = append(q.q[p], v)
 	q.size++
-	q.cond.Signal()
+	q.popCond.Signal()
 }
 
 func (q *prioQueue) Push(v interface{}, p framePrio) {
@@ -191,9 +220,8 @@ func (q *prioQueue) Push(v interface{}, p framePrio) {
 	}
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	limit := q.limitForPrio(p)
-	for !q.closed && q.size >= limit {
-		q.cond.Wait()
+	for !q.closed && q.size >= q.limitForPrio(p) {
+		q.pushCond[p].Wait()
 	}
 	if q.closed {
 		return
@@ -211,15 +239,14 @@ func (q *prioQueue) PushTimeout(v interface{}, p framePrio, timeoutms int) bool 
 	deadline := time.Now().Add(time.Duration(timeoutms) * time.Millisecond)
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	limit := q.limitForPrio(p)
-	for !q.closed && q.size >= limit {
+	for !q.closed && q.size >= q.limitForPrio(p) {
 		if time.Now().After(deadline) {
 			return false
 		}
 		// Wake periodically to re-check deadline.
 		timeout := time.Until(deadline)
-		timer := time.AfterFunc(timeout, func() { q.cond.Broadcast() })
-		q.cond.Wait()
+		timer := time.AfterFunc(timeout, func() { q.broadcastAll() })
+		q.pushCond[p].Wait()
 		timer.Stop()
 	}
 	if q.closed {
@@ -229,44 +256,21 @@ func (q *prioQueue) PushTimeout(v interface{}, p framePrio, timeoutms int) bool 
 	return true
 }
 
-// PopWait pops the highest-priority frame.
-// ok=true with non-nil v on success; closed=true if queue was closed empty;
-// both false means timeout with empty queue.
-func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, ok bool) {
+// broadcastAll wakes every waiter without holding the lock.
+func (q *prioQueue) broadcastAll() {
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.broadcastAllLocked()
+	q.mu.Unlock()
+}
 
-	if timeout <= 0 {
-		for q.size == 0 && !q.closed {
-			q.cond.Wait()
-		}
-	} else {
-		deadline := time.Now().Add(timeout)
-		var timer *time.Timer
-		for q.size == 0 && !q.closed {
-			left := time.Until(deadline)
-			if left <= 0 {
-				break
-			}
-			if timer != nil {
-				timer.Stop()
-			}
-			timer = time.AfterFunc(left, func() { q.cond.Broadcast() })
-			q.cond.Wait()
-		}
-		if timer != nil {
-			timer.Stop()
-		}
-	}
-
-	if q.size == 0 {
-		return nil, q.closed, false
-	}
+// popOneLocked removes and returns the highest-priority frame. Caller holds
+// q.mu and has verified q.size > 0.
+func (q *prioQueue) popOneLocked() interface{} {
 	for i := framePrio(0); i < prioCount; i++ {
 		if q.head[i] >= len(q.q[i]) {
 			continue
 		}
-		v = q.q[i][q.head[i]]
+		v := q.q[i][q.head[i]]
 		q.q[i][q.head[i]] = nil // drop the reference so the frame can be collected
 		q.head[i]++
 		if q.head[i] == len(q.q[i]) {
@@ -279,8 +283,63 @@ func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, 
 			q.compactLocked(i)
 		}
 		q.size--
-		q.cond.Broadcast()
-		return v, false, true
+		// Hand the freed capacity to at most one blocked pusher per priority:
+		// Signal is a no-op when nobody of that priority waits, so this stays
+		// cheap in the steady state and never wakes the whole herd.
+		for p := framePrio(0); p < prioCount; p++ {
+			if q.size < q.limitForPrio(p) {
+				q.pushCond[p].Signal()
+			}
+		}
+		return v
 	}
-	return nil, q.closed, false
+	return nil
+}
+
+// PopWait pops the highest-priority frame.
+// ok=true with non-nil v on success; closed=true if queue was closed empty;
+// both false means timeout with empty queue.
+func (q *prioQueue) PopWait(timeout time.Duration) (v interface{}, closed bool, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if timeout <= 0 {
+		for q.size == 0 && !q.closed {
+			q.popCond.Wait()
+		}
+	} else {
+		deadline := time.Now().Add(timeout)
+		var timer *time.Timer
+		for q.size == 0 && !q.closed {
+			left := time.Until(deadline)
+			if left <= 0 {
+				break
+			}
+			if timer != nil {
+				timer.Stop()
+			}
+			timer = time.AfterFunc(left, func() { q.popCond.Broadcast() })
+			q.popCond.Wait()
+		}
+		if timer != nil {
+			timer.Stop()
+		}
+	}
+
+	if q.size == 0 {
+		return nil, q.closed, false
+	}
+	return q.popOneLocked(), false, true
+}
+
+// TryPop pops without blocking: ok=false when the queue is empty. Used by the
+// send loop to top up a batch of frames for one Write without stalling on the
+// first empty moment.
+func (q *prioQueue) TryPop() (v interface{}, ok bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.size == 0 {
+		return nil, false
+	}
+	return q.popOneLocked(), true
 }

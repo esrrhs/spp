@@ -1,7 +1,7 @@
 package proxy
 
 import (
-	"crypto/cipher"
+	"bufio"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -56,7 +56,7 @@ func DefaultConfig() *Config {
 		ConnectTimeout:            15,
 		Key:                       "",
 		Encrypt:                   "",
-		EncryptType:               EncryptChaCha20,
+		EncryptType:               DefaultEncryptType(),
 		Compress:                  128,
 		CompressType:              CompressZstd,
 		ShowPing:                  false,
@@ -109,6 +109,10 @@ type ProxyConn struct {
 	sendq *prioQueue
 	recvq *prioQueue
 	// Sonny (per-proxy TCP/UDP): plain FIFO is enough.
+	// sendq/recvq/sendch/recvch are assigned before the conn is published
+	// (sync.Map registration / connMu publish), so hot-path readers can load
+	// them without a lock: any observer that can reach this conn also has the
+	// happens-before edge from the publishing store.
 	sendch             *msgChannel
 	recvch             *msgChannel
 	actived            int32
@@ -126,24 +130,25 @@ type ProxyConn struct {
 	recvBytes          int64
 	winMu              sync.Mutex
 	winCond            *sync.Cond
-	inFlightBytes      int64
-	inFlightFrames     int32
-	maxWinBytes        int64
-	maxWinFrames       int32
+	winWaiters         int32 // atomic: acquirers blocked on winCond
+	inFlightBytes      int64 // atomic; guarded by winMu only while blocked
+	inFlightFrames     int32 // atomic; guarded by winMu only while blocked
+	maxWinBytes        int64 // atomic; set once by initSendWindow before first use
+	maxWinFrames       int32 // atomic; set once by initSendWindow before first use
 	rttNs              int64 // last PONG round-trip time (atomic, status page)
-	id                string
-	needclose         int32 // atomic bool
-	authChallenge     []byte
-	compressType      int32 // COMPRESS_TYPE
-	encryptType       int32 // ENCRYPT_TYPE
-	compressThreshold int32
-	encryptKey        string // guarded by mu
-	aead              cipher.AEAD
-	noncePrefix       [4]byte
-	nonceCounter      uint64
-	mu                sync.RWMutex
-	isClosed          bool
-	closeOnce         sync.Once
+	id                 string
+	needclose          int32 // atomic bool
+	// connMu serializes the one late conn publish (Outputer.open after its
+	// dial) against closeConn's read; every other conn access happens before
+	// the conn is published or after teardown finished.
+	connMu        sync.Mutex
+	authChallenge []byte
+	// codec is an immutable per-session codec snapshot (see sessionCodec);
+	// swapped atomically by setCodec, read once per frame on the wire path.
+	codec        atomic.Pointer[sessionCodec]
+	nonceCounter uint64
+	isClosed     atomic.Bool
+	closeOnce    sync.Once
 }
 
 func (p *ProxyConn) Info() string {
@@ -155,8 +160,11 @@ func (p *ProxyConn) Info() string {
 
 func (p *ProxyConn) closeConn() {
 	p.closeOnce.Do(func() {
-		if p.conn != nil {
-			p.conn.Close()
+		p.connMu.Lock()
+		c := p.conn
+		p.connMu.Unlock()
+		if c != nil {
+			c.Close()
 		}
 	})
 }
@@ -236,8 +244,8 @@ func (p *ProxyConn) initSendWindow(connBuf int) {
 	if p.winCond == nil {
 		p.winCond = sync.NewCond(&p.winMu)
 	}
-	p.maxWinFrames = int32(w)
-	p.maxWinBytes = int64(w) * MAX_CHUNK_SIZE
+	atomic.StoreInt32(&p.maxWinFrames, int32(w))
+	atomic.StoreInt64(&p.maxWinBytes, int64(w)*windowBytesPerFrame)
 	p.winMu.Unlock()
 }
 
@@ -249,45 +257,101 @@ func (p *ProxyConn) wakeSendWindow() {
 	p.winMu.Unlock()
 }
 
-// channelsClosed reads isClosed under p.mu; CloseChannels writes it there.
+// channelsClosed reads the atomic closed flag; CloseChannels sets it.
 func (p *ProxyConn) channelsClosed() bool {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.isClosed
+	return p.isClosed.Load()
+}
+
+// windowEnabled reports whether per-sonny flow control is active. The window
+// fields are set once by initSendWindow before the conn is published, so the
+// hot-path read needs no lock.
+func (p *ProxyConn) windowEnabled() bool {
+	return p.winCond != nil && atomic.LoadInt32(&p.maxWinFrames) > 0 && atomic.LoadInt64(&p.maxWinBytes) > 0
+}
+
+// windowClosed reports the abort conditions an acquirer checks before
+// reserving: closed, needclose, or the group exiting never gets new credit.
+func (p *ProxyConn) windowClosed(wg *thread.Group) bool {
+	return p.isClosed.Load() || atomic.LoadInt32(&p.needclose) != 0 || isExit(wg)
+}
+
+// reserveWindow does the in-flight add once the caller knows space exists.
+// Only copySonnyRecv acquires per conn, so the two counters cannot be raced
+// by another acquirer; CAS keeps it robust regardless.
+func (p *ProxyConn) reserveWindow(n int64, frames int32) {
+	for {
+		cur := atomic.LoadInt64(&p.inFlightBytes)
+		if atomic.CompareAndSwapInt64(&p.inFlightBytes, cur, cur+n) {
+			break
+		}
+	}
+	for {
+		cur := atomic.LoadInt32(&p.inFlightFrames)
+		if atomic.CompareAndSwapInt32(&p.inFlightFrames, cur, cur+frames) {
+			break
+		}
+	}
 }
 
 func (p *ProxyConn) acquireSendWindow(wg *thread.Group, n int64, frames int32) bool {
-	p.winMu.Lock()
-	defer p.winMu.Unlock()
-	if p.maxWinBytes <= 0 || p.maxWinFrames <= 0 || p.winCond == nil {
+	if !p.windowEnabled() {
 		return true
 	}
-	for !p.channelsClosed() && atomic.LoadInt32(&p.needclose) == 0 && !isExit(wg) &&
-		(p.inFlightBytes >= p.maxWinBytes || p.inFlightFrames >= p.maxWinFrames) {
+	// Fast path: uncontended accounting with atomics only. Releases are
+	// single-threaded per main channel and only shrink in-flight, so a
+	// checked load can never understate the space the add will consume.
+	if !p.windowClosed(wg) &&
+		atomic.LoadInt64(&p.inFlightBytes)+n < atomic.LoadInt64(&p.maxWinBytes) &&
+		atomic.LoadInt32(&p.inFlightFrames)+frames < atomic.LoadInt32(&p.maxWinFrames) {
+		p.reserveWindow(n, frames)
+		return true
+	}
+	// Slow path: window exhausted — block. winWaiters must be incremented
+	// under winMu BEFORE the condition check: a release that lands between
+	// the check and the increment would otherwise see zero waiters and skip
+	// the broadcast, losing the wakeup.
+	p.winMu.Lock()
+	defer p.winMu.Unlock()
+	atomic.AddInt32(&p.winWaiters, 1)
+	defer atomic.AddInt32(&p.winWaiters, -1)
+	for !p.windowClosed(wg) &&
+		(atomic.LoadInt64(&p.inFlightBytes) >= atomic.LoadInt64(&p.maxWinBytes) ||
+			atomic.LoadInt32(&p.inFlightFrames) >= atomic.LoadInt32(&p.maxWinFrames)) {
 		p.winCond.Wait()
 	}
-	if p.channelsClosed() || atomic.LoadInt32(&p.needclose) != 0 || isExit(wg) {
+	if p.windowClosed(wg) {
 		return false
 	}
-	p.inFlightBytes += n
-	p.inFlightFrames += frames
+	p.reserveWindow(n, frames)
 	return true
 }
 
 func (p *ProxyConn) releaseSendWindow(n int64, frames int32) {
-	p.winMu.Lock()
-	if p.winCond != nil {
-		p.inFlightBytes -= n
-		if p.inFlightBytes < 0 {
-			p.inFlightBytes = 0
-		}
-		p.inFlightFrames -= frames
-		if p.inFlightFrames < 0 {
-			p.inFlightFrames = 0
-		}
-		p.winCond.Broadcast()
+	if !p.windowEnabled() {
+		return
 	}
-	p.winMu.Unlock()
+	atomic.AddInt64(&p.inFlightBytes, -n)
+	atomic.AddInt32(&p.inFlightFrames, -frames)
+	// Clamp a transient negative (release racing a fresh acquire) back to 0.
+	for {
+		cur := atomic.LoadInt64(&p.inFlightBytes)
+		if cur >= 0 || atomic.CompareAndSwapInt64(&p.inFlightBytes, cur, 0) {
+			break
+		}
+	}
+	for {
+		cur := atomic.LoadInt32(&p.inFlightFrames)
+		if cur >= 0 || atomic.CompareAndSwapInt32(&p.inFlightFrames, cur, 0) {
+			break
+		}
+	}
+	// Wake a blocked acquirer only when one exists: the steady state (no
+	// backpressure) must not pay a mutex+Broadcast per frame.
+	if atomic.LoadInt32(&p.winWaiters) > 0 {
+		p.winMu.Lock()
+		p.winCond.Broadcast()
+		p.winMu.Unlock()
+	}
 }
 
 const winMsgPrefix = "win:"
@@ -368,12 +432,9 @@ func dialWithTimeout(conn network.Conn, addr string, timeoutSec int) (network.Co
 
 // CloseChannels safely closes all internal queues without racing with concurrent send/recv.
 func (p *ProxyConn) CloseChannels() {
-	p.mu.Lock()
-	if p.isClosed {
-		p.mu.Unlock()
+	if !p.isClosed.CompareAndSwap(false, true) {
 		return
 	}
-	p.isClosed = true
 	if p.sendq != nil {
 		p.sendq.Close()
 	}
@@ -386,14 +447,11 @@ func (p *ProxyConn) CloseChannels() {
 	if p.recvch != nil {
 		p.recvch.Close()
 	}
-	p.mu.Unlock()
 	p.wakeSendWindow()
 }
 
 func (p *ProxyConn) pickSendQ() *prioQueue {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
+	if p.isClosed.Load() {
 		return nil
 	}
 	return p.sendq
@@ -406,27 +464,21 @@ func (p *ProxyConn) wakeSendQ() {
 }
 
 func (p *ProxyConn) pickRecvQ() *prioQueue {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
+	if p.isClosed.Load() {
 		return nil
 	}
 	return p.recvq
 }
 
 func (p *ProxyConn) pickSendCh() *msgChannel {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
+	if p.isClosed.Load() {
 		return nil
 	}
 	return p.sendch
 }
 
 func (p *ProxyConn) pickRecvCh() *msgChannel {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	if p.isClosed {
+	if p.isClosed.Load() {
 		return nil
 	}
 	return p.recvch
@@ -444,6 +496,22 @@ func (p *ProxyConn) SendFrame(f *ProxyFrame) {
 	}
 	if ch := p.pickSendCh(); ch != nil {
 		ch.Write(f)
+	}
+}
+
+// SendDataRaw pushes a queue element (plain frame or pooled envelope) onto
+// the main channel, preserving the pool tag for the terminal consumer.
+func (p *ProxyConn) SendDataRaw(v interface{}, isInteractive bool) {
+	if q := p.pickSendQ(); q != nil {
+		prio := prioBulk
+		if isInteractive {
+			prio = prioInter
+		}
+		q.Push(v, prio)
+		return
+	}
+	if ch := p.pickSendCh(); ch != nil {
+		ch.Write(v)
 	}
 }
 
@@ -467,16 +535,25 @@ func (p *ProxyConn) SendData(f *ProxyFrame, isInteractive bool) {
 // size-based prioInter jump-ahead reorders chunks of the same TCP stream and
 // kills the connection with "index error". Similarly, CLOSE must not overtake
 // DATA of the same stream (or premature EOF drops the tail of the payload).
-func (p *ProxyConn) RecvFrame(f *ProxyFrame) {
+// RecvFrame enqueues a received queue element (plain frame or pooled
+// envelope); the pool tag rides along to the terminal consumer. DATA must
+// stay FIFO here: sendToSonny requires per-sonny Index order, so
+// size-based prioInter jump-ahead reorders chunks of the same TCP stream and
+// kills the connection with "index error". Similarly, CLOSE must not overtake
+// DATA of the same stream (or premature EOF drops the tail of the payload).
+func (p *ProxyConn) RecvFrame(v interface{}) {
+	f := queueFrame(v)
 	if q := p.pickRecvQ(); q != nil {
 		prio := prioControl
 		if f.Type == FRAME_TYPE_DATA || f.Type == FRAME_TYPE_CLOSE {
 			prio = prioBulk
 		}
-		q.Push(f, prio)
+		q.Push(v, prio)
 		return
 	}
 	if ch := p.pickRecvCh(); ch != nil {
+		// Defensive fallback (main conns always have a recvq): drop the pool
+		// tag rather than hand an envelope to a plain-frame consumer.
 		ch.Write(f)
 	}
 }
@@ -496,6 +573,20 @@ func (p *ProxyConn) SendSonnyData(f *ProxyFrame, timeoutMs int) bool {
 	return ch.WriteTimeout(f, timeoutMs)
 }
 
+// SendSonnyDataRaw pushes a queue element (plain frame or pooled envelope)
+// into sonny's sendch, preserving the pool tag for the terminal consumer.
+func (p *ProxyConn) SendSonnyDataRaw(v interface{}, timeoutMs int) bool {
+	ch := p.pickSendCh()
+	if ch == nil {
+		return true
+	}
+	if timeoutMs <= 0 {
+		ch.Write(v)
+		return true
+	}
+	return ch.WriteTimeout(v, timeoutMs)
+}
+
 // SendSonnyClose safely writes a close frame to sonny's sendch.
 func (p *ProxyConn) SendSonnyClose(f *ProxyFrame) {
 	if ch := p.pickSendCh(); ch != nil {
@@ -503,10 +594,11 @@ func (p *ProxyConn) SendSonnyClose(f *ProxyFrame) {
 	}
 }
 
-// RecvSonnyData safely writes an incoming frame from sonny's socket to sonny's recvch.
-func (p *ProxyConn) RecvSonnyData(f *ProxyFrame) {
+// RecvSonnyData safely writes an incoming queue element (plain frame or
+// pooled envelope) from sonny's socket to sonny's recvch.
+func (p *ProxyConn) RecvSonnyData(v interface{}) {
 	if ch := p.pickRecvCh(); ch != nil {
-		ch.Write(f)
+		ch.Write(v)
 	}
 }
 
@@ -601,20 +693,94 @@ func readFullConn(conn io.Reader, buf []byte, proxyconn *ProxyConn) error {
 	return nil
 }
 
+// pooledFrame carries a frame whose DataFrame.Data came from dataBufPool
+// through the download queues (recvq -> bizq -> sendch). The wrapper is the
+// pool tag: only wrapped frames are returned to the pool at their terminal
+// consumer, so plain and test-constructed frames can never alias a recycled
+// buffer. Envelopes are pooled themselves.
+type pooledFrame struct {
+	f *ProxyFrame
+}
+
+var pooledFramePool = sync.Pool{New: func() any {
+	return &pooledFrame{}
+}}
+
+func wrapPooledFrame(f *ProxyFrame) interface{} {
+	pf := pooledFramePool.Get().(*pooledFrame)
+	pf.f = f
+	return pf
+}
+
+// queueFrame extracts the frame from a queue element of either flavor.
+func queueFrame(v interface{}) *ProxyFrame {
+	if pf, ok := v.(*pooledFrame); ok {
+		return pf.f
+	}
+	return v.(*ProxyFrame)
+}
+
+// frameAndPooled splits a queue element into its frame and, when present, its
+// pool envelope (so the terminal consumer can recycle both).
+func frameAndPooled(v interface{}) (*ProxyFrame, *pooledFrame) {
+	if pf, ok := v.(*pooledFrame); ok {
+		return pf.f, pf
+	}
+	return v.(*ProxyFrame), nil
+}
+
+// recyclePooledFrame returns an empty envelope to its pool.
+func recyclePooledFrame(pf *pooledFrame) {
+	if pf != nil {
+		pf.f = nil
+		pooledFramePool.Put(pf)
+	}
+}
+
+// releasePooled returns a consumed queue element's payload buffer (and the
+// envelope) to the pools. Safe on plain frames: the type assert just fails.
+func releasePooled(v interface{}) {
+	pf, ok := v.(*pooledFrame)
+	if !ok {
+		return
+	}
+	f := pf.f
+	pf.f = nil
+	pooledFramePool.Put(pf)
+	if f != nil && f.DataFrame != nil {
+		putPooledDataBuf(f.DataFrame.Data)
+	}
+}
+
 func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgsize int) error {
 
 	atomic.AddInt32(&gStateThreadNum.RecvThread, 1)
 	defer atomic.AddInt32(&gStateThreadNum.RecvThread, -1)
 
 	loggo.Info("recvFrom start %s", conn.Info())
+	// Persistent read buffer: the 4-byte length prefix used to cost one Read
+	// syscall and the frame body a second — two syscalls per frame on the
+	// receive side while sendTo already writes each frame in one call. With a
+	// buffer, the length prefix (and small bodies) come from memory and a
+	// single refill serves many frames; bodies at least as large as the
+	// buffer bypass it and read straight into ds, so large frames still cost
+	// one syscall. Message-oriented transports (rudp/kcp/quic) just coalesce
+	// their refills the same way. recvFrom is the conn's only reader.
+	const recvBufSize = 64 * 1024
+	br := bufio.NewReaderSize(conn, recvBufSize)
 	bs := make([]byte, 4)
 	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE+aeadOverhead)
+	// Plaintext scratch for AEAD open: reused across frames so the wire path
+	// does not allocate + copy a fresh plaintext per frame. (openWireAppend
+	// rebinds plain to ds when encryption is off; cipher.AEAD.Open tolerates
+	// dst/ciphertext aliasing, so both cases stay correct.)
+	plain := make([]byte, 0, recvBufSize)
 
 	for !isExit(wg) {
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull len %s", conn.Info())
 		}
-		err := readFullConn(conn, bs, proxyconn)
+		err := readFullConn(br, bs, proxyconn)
 		if err != nil {
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
@@ -630,19 +796,21 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 		if loggo.IsDebug() {
 			loggo.Debug("recvFrom start ReadFull body %s %d", conn.Info(), msglen)
 		}
-		err = readFullConn(conn, ds[0:msglen], proxyconn)
+		err = readFullConn(br, ds[0:msglen], proxyconn)
 		if err != nil {
 			loggo.Info("recvFrom ReadFull fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
 
-		plain, err := proxyconn.openWire(ds[0:msglen])
+		plain, err = proxyconn.openWireAppend(plain[:0], ds[0:msglen])
 		if err != nil {
 			loggo.Error("recvFrom openWire fail: %s %s", conn.Info(), err.Error())
 			return err
 		}
 
-		f, err := UnmarshalSrpFrame(plain, proxyconn.getCodec())
+		// Pooled decode: compressed DATA payloads come from dataBufPool and
+		// travel wrapped so the terminal consumer (sendToSonny) returns them.
+		f, dataPooled, err := UnmarshalSrpFramePooled(plain, proxyconn.getCodec())
 		if err != nil {
 			loggo.Error("recvFrom UnmarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
 			return err
@@ -676,8 +844,12 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 			loggo.Debug("recvFrom start Write %s", conn.Info())
 		}
 
+		var qv interface{} = f
+		if dataPooled {
+			qv = wrapPooledFrame(f)
+		}
 		atomic.StoreInt32(&proxyconn.inRecvBackpressure, 1)
-		proxyconn.RecvFrame(f)
+		proxyconn.RecvFrame(qv)
 		atomic.StoreInt32(&proxyconn.inRecvBackpressure, 0)
 
 		atomic.AddInt32(&gState.MainRecvNum, 1)
@@ -717,7 +889,18 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 	plain := make([]byte, 0, scratch)
 
 	for !isExit(wg) {
+		// One Write per batch instead of per frame: fewer syscalls for TCP,
+		// and proportionally fewer packets for the message-oriented transports
+		// (rudp/kcp/ricmp), where packet rate is what a small box runs out of
+		// first. The first frame is a blocking pop (or an inline ping/pong);
+		// the rest are topped up without blocking. Pop order is priority
+		// order and a single Write preserves it; frames arriving during
+		// assembly wait at most one batch. Light load degrades to batch of 1.
+		// wire is pre-sized per frame so sealWireAppend can never reallocate
+		// mid-batch (a realloc would copy only the 4-byte dst, dropping
+		// earlier frames' bytes).
 		var f *ProxyFrame
+		var pv *pooledFrame
 		if atomic.LoadInt32(pingflag) > 0 {
 			atomic.StoreInt32(pingflag, 0)
 			f = &ProxyFrame{}
@@ -738,49 +921,97 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 				}
 				continue
 			}
-			f = v.(*ProxyFrame)
+			f, pv = frameAndPooled(v)
 		}
-		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
-			loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
-			if f.Type == FRAME_TYPE_DATA {
-				if f.DataFrame.Crc != "" && common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
-					loggo.Error("sendTo crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
-					return errors.New("conn crc error")
+
+		const batchMaxFrames = 16
+		const batchMaxBytes = 64 * 1024
+		wire = wire[:0]
+		nbatch := 0
+		pingSolo := f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG
+		for {
+			if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG && loggo.IsDebug() {
+				loggo.Debug("sendTo %s %s", conn.Info(), f.Type.String())
+				if f.Type == FRAME_TYPE_DATA {
+					if f.DataFrame.Crc != "" && common.GetCrc32(f.DataFrame.Data) != f.DataFrame.Crc {
+						loggo.Error("sendTo crc error %s %s %s %p", conn.Info(), common.GetCrc32(f.DataFrame.Data), f.DataFrame.Crc, f)
+						return errors.New("conn crc error")
+					}
 				}
 			}
-		}
 
-		var err error
-		plain, err = MarshalSrpFrameAppend(plain[:0], f, proxyconn.getCodec())
-		if err != nil {
-			loggo.Error("sendTo MarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
-			return err
-		}
+			// The pooled payload (if any) is copied into plain by the marshal
+			// and is dead afterwards. Capture it before the marshal: the
+			// compression gate swaps Data for its own buffer on success.
+			// Control frames have no DataFrame at all.
+			var origData []byte
+			if f.DataFrame != nil {
+				origData = f.DataFrame.Data
+			}
 
-		if len(plain) == 0 {
-			loggo.Error("sendTo len fail: %s %d", conn.Info(), len(plain))
-			return errors.New("msg len fail 0")
-		}
+			var err error
+			plain, err = MarshalSrpFrameAppend(plain[:0], f, proxyconn.getCodec())
+			if err != nil {
+				loggo.Error("sendTo MarshalSrpFrame fail: %s %s", conn.Info(), err.Error())
+				return err
+			}
 
-		// Keep the 4-byte prefix slot and append the sealed body behind it.
-		wire, err = proxyconn.sealWireAppend(wire[:4], plain)
-		if err != nil {
-			loggo.Error("sendTo sealWire fail: %s %s", conn.Info(), err.Error())
-			return err
-		}
+			if pv != nil {
+				putPooledDataBuf(origData)
+				recyclePooledFrame(pv)
+				pv = nil
+			}
 
-		msglen := uint32(len(wire) - 4)
-		if msglen > maxWire || msglen == 0 {
-			loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
-			return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
+			if len(plain) == 0 {
+				loggo.Error("sendTo len fail: %s %d", conn.Info(), len(plain))
+				return errors.New("msg len fail 0")
+			}
+
+			if need := 4 + aeadNonceSize + len(plain) + aeadOverhead; cap(wire)-len(wire) < need {
+				grown := make([]byte, len(wire), len(wire)+need+256)
+				copy(grown, wire)
+				wire = grown
+			}
+
+			start := len(wire)
+			wire = append(wire, 0, 0, 0, 0)
+			// Pass the whole buffer up to and including the prefix slot:
+			// append extends at the slice's end, so a dst windowed at start
+			// would return a slice that drops the earlier frames' bytes.
+			wire, err = proxyconn.sealWireAppend(wire[:start+4], plain)
+			if err != nil {
+				loggo.Error("sendTo sealWire fail: %s %s", conn.Info(), err.Error())
+				return err
+			}
+
+			msglen := uint32(len(wire) - start - 4)
+			if msglen > maxWire || msglen == 0 {
+				loggo.Error("sendTo len fail: %s %d", conn.Info(), msglen)
+				return errors.New("msg len fail " + strconv.Itoa(int(msglen)))
+			}
+
+			if loggo.IsDebug() {
+				loggo.Debug("sendTo frame len %s %d", conn.Info(), msglen)
+			}
+			binary.LittleEndian.PutUint32(wire[start:start+4], msglen)
+			nbatch++
+
+			// Ping/pong goes out alone: it is the liveness signal and must
+			// not sit behind a full batch being assembled.
+			if pingSolo || nbatch >= batchMaxFrames || len(wire) >= batchMaxBytes {
+				break
+			}
+			v, ok := sendq.TryPop()
+			if !ok {
+				break
+			}
+			f, pv = frameAndPooled(v)
 		}
 
 		if loggo.IsDebug() {
-			loggo.Debug("sendTo start Write len %s %d", conn.Info(), msglen)
+			loggo.Debug("sendTo start Write len %s %d frames %d", conn.Info(), len(wire), nbatch)
 		}
-		binary.LittleEndian.PutUint32(wire[:4], msglen)
-
-		if f.Type != FRAME_TYPE_PING && f.Type != FRAME_TYPE_PONG {
+		if !pingSolo {
 			atomic.StoreInt32(&proxyconn.inSendBackpressure, 1)
 		}
 		n, err := conn.Write(wire)
@@ -795,23 +1026,30 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			return errors.New("len error")
 		}
 
-		if f.Type != FRAME_TYPE_PING {
+		if !pingSolo {
 			atomic.StoreInt64(&proxyconn.lastSendNano, time.Now().UnixNano())
-			if f.Type != FRAME_TYPE_PONG {
-				atomic.StoreInt32(&proxyconn.sendActive, 1)
-			}
+			atomic.StoreInt32(&proxyconn.sendActive, 1)
 		}
 
-		atomic.AddInt32(&gState.MainSendNum, 1)
-		atomic.AddInt64(&gState.MainSendSize, int64(msglen)+4)
+		atomic.AddInt32(&gState.MainSendNum, int32(nbatch))
+		atomic.AddInt64(&gState.MainSendSize, int64(len(wire)))
 	}
 	loggo.Info("sendTo end %s", conn.Info())
 	return nil
 }
 
 const (
-	MAX_INDEX               = 1024
-	MAX_CHUNK_SIZE          = 16 * 1024  // Chunk frames to 16KB to allow fine interleaving and prevent head-of-line blocking
+	MAX_INDEX = 1024
+	// Chunk frames to 32KB: halves the per-frame Write syscalls on the target
+	// conn (the bulk profile showed them at ~50% of server CPU with 16KB
+	// frames, and per-sonny frame arrivals are too sparse for write batching
+	// to form). Interleaving granularity coarsens accordingly — the
+	// interactive priority still jumps between frames.
+	MAX_CHUNK_SIZE = 32 * 1024
+	// The per-sonny flow-control window bounds in-flight BYTES; freeze it at
+	// its historical 1MB (64 x the old 16KB chunk) so doubling the chunk size
+	// does not double the bufferbloat on narrow pipes.
+	windowBytesPerFrame     = 16 * 1024
 	INTERACTIVE_BYTES_LIMIT = 512 * 1024 // Initial bytes per sonny at prioInter (jumps ahead of bulk)
 )
 
@@ -821,12 +1059,20 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 	if bufSize > MAX_CHUNK_SIZE {
 		bufSize = MAX_CHUNK_SIZE
 	}
-	ds := make([]byte, bufSize)
 
 	index := int32(0)
 	for !isExit(wg) {
-		msglen, err := conn.Read(ds)
+		// Read straight into a pooled buffer: the payload becomes the frame's
+		// Data with no copy, and the buffer travels wrapped (pool tag) to the
+		// terminal consumer (sendTo's marshal), which returns it.
+		ds := getPooledDataBuf()
+		if cap(ds) < bufSize {
+			// Belt and suspenders for the pool's capacity floor.
+			ds = make([]byte, 0, bufSize)
+		}
+		msglen, err := conn.Read(ds[:bufSize])
 		if err != nil {
+			putPooledDataBuf(ds)
 			loggo.Debug("recvFromSonny Read fail: %s %s", conn.Info(), err)
 			if ch := proxyconn.pickRecvCh(); ch != nil {
 				// Close recvch so copySonnyRecv drains all already-queued frames
@@ -838,6 +1084,7 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 		}
 
 		if msglen <= 0 {
+			putPooledDataBuf(ds)
 			loggo.Error("recvFromSonny len error: %s %d", conn.Info(), msglen)
 			return errors.New("len error " + strconv.Itoa(msglen))
 		}
@@ -845,8 +1092,7 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 		f := &ProxyFrame{}
 		f.Type = FRAME_TYPE_DATA
 		f.DataFrame = &DataFrame{}
-		f.DataFrame.Data = make([]byte, msglen)
-		copy(f.DataFrame.Data, ds[0:msglen])
+		f.DataFrame.Data = ds[:msglen]
 		f.DataFrame.Compress = false
 		if loggo.IsDebug() {
 			f.DataFrame.Crc = common.GetCrc32(f.DataFrame.Data)
@@ -860,7 +1106,7 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 		atomic.AddInt32(&gState.RecvNum, 1)
 		atomic.AddInt64(&gState.RecvSize, int64(msglen))
 
-		proxyconn.RecvSonnyData(f)
+		proxyconn.RecvSonnyData(wrapPooledFrame(f))
 	}
 	loggo.Info("recvFromSonny end %s", conn.Info())
 	return nil
@@ -868,6 +1114,21 @@ func recvFromSonny(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, ma
 
 func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, sendch *msgChannel, conn network.Conn, maxmsgsize int) error {
 	loggo.Info("sendToSonny start %s", conn.Info())
+	// Stream targets may take one Write per batch instead of per frame (the
+	// payload of consecutive frames is one ordered stream). Every transport
+	// except udp is a reliable ordered stream at the Write level — kcp/quic
+	// write into their session/stream, rudp/ricmp/rhttp loop until the whole
+	// buffer is handed to their send machinery — so only datagram targets
+	// keep the 1:1 mapping (frames must not be concatenated). batch=1 (the
+	// common case when the target keeps up) writes the frame's own buffer
+	// directly, zero-copy.
+	batchable := conn.Name() != "udp"
+	const (
+		sendBatchMaxFrames = 16
+		sendBatchBytes     = 64 * 1024
+	)
+	var scratch []byte
+	var datas [][]byte
 	index := int32(0)
 	var ackedBytes int64
 	var ackedFrames int32
@@ -875,11 +1136,11 @@ func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, send
 	stepBytes := int64(MAX_CHUNK_SIZE)
 	if proxyconn != nil {
 		proxyconn.winMu.Lock()
-		if proxyconn.maxWinFrames >= 4 {
-			stepFrames = proxyconn.maxWinFrames / 4
+		if atomic.LoadInt32(&proxyconn.maxWinFrames) >= 4 {
+			stepFrames = atomic.LoadInt32(&proxyconn.maxWinFrames) / 4
 		}
-		if proxyconn.maxWinBytes >= 4*MAX_CHUNK_SIZE {
-			stepBytes = proxyconn.maxWinBytes / 4
+		if atomic.LoadInt64(&proxyconn.maxWinBytes) >= 4*MAX_CHUNK_SIZE {
+			stepBytes = atomic.LoadInt64(&proxyconn.maxWinBytes) / 4
 		}
 		proxyconn.winMu.Unlock()
 	}
@@ -888,55 +1149,87 @@ func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, send
 		if !ok {
 			break
 		}
-		f := ff.(*ProxyFrame)
+		f := queueFrame(ff)
 		if f.Type == FRAME_TYPE_CLOSE {
 			loggo.Info("sendToSonny close by remote: %s", conn.Info())
+			releasePooled(ff)
 			return errors.New("close by remote")
 		}
-		if f.DataFrame.Compress {
-			loggo.Error("sendToSonny Compress error: %s", conn.Info())
-			return errors.New("msg compress error")
+		if err := validateSonnyData(f, conn, maxmsgsize, &index); err != nil {
+			return err
 		}
 
-		if len(f.DataFrame.Data) <= 0 {
-			loggo.Error("sendToSonny len error: %s %d", conn.Info(), len(f.DataFrame.Data))
-			return errors.New("len error " + strconv.Itoa(len(f.DataFrame.Data)))
-		}
-
-		if len(f.DataFrame.Data) > maxmsgsize {
-			loggo.Error("sendToSonny len error: %s %d", conn.Info(), len(f.DataFrame.Data))
-			return errors.New("len error " + strconv.Itoa(len(f.DataFrame.Data)))
-		}
-
-		if loggo.IsDebug() {
-			if f.DataFrame.Crc != "" && f.DataFrame.Crc != common.GetCrc32(f.DataFrame.Data) {
-				loggo.Error("sendToSonny crc error: %s %d %s %s", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Crc, common.GetCrc32(f.DataFrame.Data))
-				return errors.New("crc error")
+		// Top up a batch of validated frames. A terminal CLOSE stops the
+		// top-up and is handled after the batch goes out — FIFO order holds.
+		var raws [sendBatchMaxFrames]interface{}
+		raws[0] = ff
+		nbatch := 1
+		total := len(f.DataFrame.Data)
+		pendingClose := interface{}(nil)
+		for batchable && nbatch < sendBatchMaxFrames && total < sendBatchBytes {
+			more, ok2 := sendch.TryReadWait()
+			if !ok2 {
+				break
 			}
+			mf := queueFrame(more)
+			if mf.Type == FRAME_TYPE_CLOSE {
+				pendingClose = more
+				break
+			}
+			if err := validateSonnyData(mf, conn, maxmsgsize, &index); err != nil {
+				for i := 0; i < nbatch; i++ {
+					releasePooled(raws[i])
+				}
+				releasePooled(more)
+				return err
+			}
+			raws[nbatch] = more
+			nbatch++
+			total += len(mf.DataFrame.Data)
+		}
+		datas = datas[:0]
+		for i := 0; i < nbatch; i++ {
+			datas = append(datas, queueFrame(raws[i]).DataFrame.Data)
 		}
 
-		index++
-		index = index % MAX_INDEX
-		if f.DataFrame.Index != index {
-			loggo.Error("sendToSonny index error: %s %d %d %d", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Index, index)
-			return errors.New("index error")
+		var n int
+		var err error
+		if nbatch == 1 {
+			n, err = conn.Write(datas[0])
+		} else {
+			if cap(scratch)-len(scratch) < total {
+				grown := make([]byte, 0, total+4096)
+				scratch = grown
+			}
+			scratch = scratch[:0]
+			for i := 0; i < nbatch; i++ {
+				scratch = append(scratch, datas[i]...)
+			}
+			n, err = conn.Write(scratch)
 		}
-
-		n, err := conn.Write(f.DataFrame.Data)
 		if err != nil {
 			loggo.Debug("sendToSonny Write fail: %s %s", conn.Info(), err)
 			return err
 		}
 
-		if n != len(f.DataFrame.Data) {
-			loggo.Error("sendToSonny Write len fail: %s %d %d", conn.Info(), n, len(f.DataFrame.Data))
+		if n != total {
+			loggo.Error("sendToSonny Write len fail: %s %d %d", conn.Info(), n, total)
+			for i := 0; i < nbatch; i++ {
+				releasePooled(raws[i])
+			}
 			return errors.New("len error")
+		}
+
+		// Terminal consumer of the download chain: the payload bytes are in
+		// the target conn now, so pooled buffers go back to the pool.
+		for i := 0; i < nbatch; i++ {
+			releasePooled(raws[i])
 		}
 
 		if proxyconn != nil {
 			atomic.AddInt32(&proxyconn.actived, 1)
-			ackedBytes += int64(n)
-			ackedFrames++
+			ackedBytes += int64(total)
+			ackedFrames += int32(nbatch)
 			if ackedBytes >= stepBytes || ackedFrames >= stepFrames || len(sendch.Ch()) == 0 {
 				sendWindowUpdate(father, proxyconn.id, ackedBytes, ackedFrames)
 				ackedBytes = 0
@@ -945,16 +1238,53 @@ func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, send
 		}
 
 		if loggo.IsDebug() {
-			loggo.Debug("sendToSonny %s %d %s %d", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Crc, f.DataFrame.Index)
+			loggo.Debug("sendToSonny %s %d bytes %d frames", conn.Info(), total, nbatch)
 		}
 
-		atomic.AddInt32(&gState.SendNum, 1)
-		atomic.AddInt64(&gState.SendSize, int64(len(f.DataFrame.Data)))
+		atomic.AddInt32(&gState.SendNum, int32(nbatch))
+		atomic.AddInt64(&gState.SendSize, int64(total))
+
+		if pendingClose != nil {
+			releasePooled(pendingClose)
+			loggo.Info("sendToSonny close by remote: %s", conn.Info())
+			return errors.New("close by remote")
+		}
 	}
 	if proxyconn != nil && ackedFrames > 0 {
 		sendWindowUpdate(father, proxyconn.id, ackedBytes, ackedFrames)
 	}
 	loggo.Info("sendToSonny end %s", conn.Info())
+	return nil
+}
+
+// validateSonnyData runs the per-frame checks sendToSonny applies before
+// writing: no compression flag, sane length, and the expected sequence index.
+// *index is the caller's rolling counter and is advanced on success.
+func validateSonnyData(f *ProxyFrame, conn network.Conn, maxmsgsize int, index *int32) error {
+	if f.DataFrame.Compress {
+		loggo.Error("sendToSonny Compress error: %s", conn.Info())
+		return errors.New("msg compress error")
+	}
+	if len(f.DataFrame.Data) <= 0 {
+		loggo.Error("sendToSonny len error: %s %d", conn.Info(), len(f.DataFrame.Data))
+		return errors.New("len error " + strconv.Itoa(len(f.DataFrame.Data)))
+	}
+	if len(f.DataFrame.Data) > maxmsgsize {
+		loggo.Error("sendToSonny len error: %s %d", conn.Info(), len(f.DataFrame.Data))
+		return errors.New("len error " + strconv.Itoa(len(f.DataFrame.Data)))
+	}
+	if loggo.IsDebug() {
+		if f.DataFrame.Crc != "" && f.DataFrame.Crc != common.GetCrc32(f.DataFrame.Data) {
+			loggo.Error("sendToSonny crc error: %s %d %s %s", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Crc, common.GetCrc32(f.DataFrame.Data))
+			return errors.New("crc error")
+		}
+	}
+	*index++
+	*index = *index % MAX_INDEX
+	if f.DataFrame.Index != *index {
+		loggo.Error("sendToSonny index error: %s %d %d %d", conn.Info(), len(f.DataFrame.Data), f.DataFrame.Index, *index)
+		return errors.New("index error")
+	}
 	return nil
 }
 
@@ -1150,7 +1480,7 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 		if !ok {
 			break
 		}
-		f := ff.(*ProxyFrame)
+		f := queueFrame(ff)
 		if f.Type != FRAME_TYPE_DATA {
 			loggo.Error("copySonnyRecv type error %s %d", proxyConn.Info(), f.Type)
 			return errors.New("conn type error")
@@ -1174,7 +1504,7 @@ func copySonnyRecv(wg *thread.Group, recvch *msgChannel, proxyConn *ProxyConn, f
 
 		dataCrc := f.DataFrame.Crc
 		curSent := atomic.AddInt64(&proxyConn.sentBytes, int64(dataLen))
-		father.SendData(f, curSent <= INTERACTIVE_BYTES_LIMIT)
+		father.SendDataRaw(ff, curSent <= INTERACTIVE_BYTES_LIMIT)
 
 		loggo.Debug("copySonnyRecv %s %d %s %p", proxyConn.id, dataLen, dataCrc, f)
 	}
@@ -1301,9 +1631,23 @@ func showState(wg *thread.Group) {
 			break
 
 		case <-ticker.C:
-			loggo.Info("showState\n%s\n%s", common.StructToTable(&gStateThreadNum), common.StructToTable(&gState))
+			// Snapshot first, then reset field-by-field with atomics: a plain
+			// struct write (and StructToTable's plain reads) raced the atomic
+			// adds every wire worker makes to these counters.
+			snapThreads := snapshotThreadNum()
+			snap := snapshotState()
+			loggo.Info("showState\n%s\n%s", common.StructToTable(&snapThreads), common.StructToTable(&snap))
 			loggo.Info("Goroutine Num: %d", runtime.NumGoroutine())
-			gState = State{}
+			atomic.StoreInt32(&gState.MainRecvNum, 0)
+			atomic.StoreInt64(&gState.MainRecvSize, 0)
+			atomic.StoreInt32(&gState.MainSendNum, 0)
+			atomic.StoreInt64(&gState.MainSendSize, 0)
+			atomic.StoreInt32(&gState.RecvNum, 0)
+			atomic.StoreInt64(&gState.RecvSize, 0)
+			atomic.StoreInt32(&gState.SendNum, 0)
+			atomic.StoreInt64(&gState.SendSize, 0)
+			atomic.StoreInt64(&gState.RecvCompSaveSize, 0)
+			atomic.StoreInt64(&gState.SendCompSaveSize, 0)
 		}
 	}
 	loggo.Info("showState end")

@@ -211,11 +211,11 @@ func TestDefaultFrameCodec_Branches(t *testing.T) {
 	if c.CompressType != CompressZstd || c.EncryptType != EncryptNone {
 		t.Fatalf("unexpected default codec: %v %v", c.CompressType, c.EncryptType)
 	}
-	// With an encrypt key set, the chacha20 default kicks in.
+	// With an encrypt key set, the hardware AEAD default kicks in.
 	cfg.Encrypt = "wire-key"
 	c = defaultFrameCodec(cfg)
-	if c.CompressType != CompressZstd || c.EncryptType != EncryptChaCha20 {
-		t.Fatalf("expected zstd+chacha20 with key: %v %v", c.CompressType, c.EncryptType)
+	if c.CompressType != CompressZstd || c.EncryptType != DefaultEncryptType() {
+		t.Fatalf("expected zstd+%v with key: %v %v", DefaultEncryptType(), c.CompressType, c.EncryptType)
 	}
 
 	// Compression disabled forces NONE even when a type is set.
@@ -310,5 +310,117 @@ func TestCRC32_Stable(t *testing.T) {
 	}
 	if common.GetCrc32([]byte("other")) == a {
 		t.Fatal("crc collided for distinct input")
+	}
+}
+
+// After gateFailThreshold consecutive failed attempts the gate must enter
+// skip mode and probe exactly once per gateProbeInterval frames.
+func TestCompressGate_SkipsAfterConsecutiveFails(t *testing.T) {
+	g := &compressGate{}
+	for i := 0; i < gateFailThreshold; i++ {
+		g.record(false)
+	}
+	attempts := 0
+	for i := 0; i < gateSkipFrames; i++ {
+		if g.allow() {
+			attempts++
+		}
+	}
+	if want := gateSkipFrames / gateProbeInterval; attempts != want {
+		t.Fatalf("probe attempts=%d want %d", attempts, want)
+	}
+	// Skip mode expired: full attempts resume.
+	if !g.allow() {
+		t.Fatal("gate must expire back to always-allow")
+	}
+}
+
+func TestCompressGate_SuccessResets(t *testing.T) {
+	g := &compressGate{}
+	for i := 0; i < gateFailThreshold; i++ {
+		g.record(false)
+	}
+	g.record(true)
+	// Every success resets the failure streak, so a success-per-attempt
+	// stream must never re-enter skip mode.
+	for i := 0; i < 4*gateSkipFrames; i++ {
+		if !g.allow() {
+			t.Fatal("successes must keep the gate open")
+		}
+		g.record(true)
+	}
+	// Once failures re-accumulate, skipping must engage again. The first call
+	// lands on the skip-counter boundary and is the probe; the following
+	// non-probe frames must all skip.
+	for i := 0; i < gateFailThreshold; i++ {
+		g.record(false)
+	}
+	if !g.allow() {
+		t.Fatal("boundary probe must attempt")
+	}
+	for i := 1; i < gateProbeInterval; i++ {
+		if g.allow() {
+			t.Fatal("frames inside skip mode must not attempt (except probes)")
+		}
+	}
+}
+
+func TestCompressGate_NilAlwaysAllows(t *testing.T) {
+	var g *compressGate
+	if !g.allow() {
+		t.Fatal("nil gate must always allow")
+	}
+	g.record(true) // must not panic
+}
+
+// A gated conn sees an incompressible stretch (gate engages), keeps skipping,
+// then compressible traffic arrives (a probe succeeds and compression
+// resumes). Every frame must round-trip byte-exact in both modes.
+func TestCompressGate_WireRoundTrip(t *testing.T) {
+	p := &ProxyConn{}
+	p.setCodec(FrameCodec{CompressType: CompressZstd, CompressThreshold: 128})
+	codec := p.getCodec()
+	randPayload := benchPayload(16*1024, "rand")
+	textPayload := benchPayload(16*1024, "text")
+
+	compressed, plain := 0, 0
+	send := func(payload []byte) {
+		f := benchDataFrame(append([]byte(nil), payload...))
+		mb, err := MarshalSrpFrame(f, codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if f.DataFrame.Compress {
+			compressed++
+		} else {
+			plain++
+		}
+		got, err := UnmarshalSrpFrame(mb, codec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got.DataFrame.Data, payload) {
+			t.Fatalf("data mismatch (len %d)", len(payload))
+		}
+	}
+
+	for i := 0; i < 60; i++ { // incompressible stretch: gate enters skip mode
+		send(randPayload)
+	}
+	if compressed != 0 {
+		t.Fatalf("rand stretch must never compress, got %d", compressed)
+	}
+	if plain == 0 {
+		t.Fatal("rand stretch must produce frames")
+	}
+	skipped := plain
+	for i := 0; i < 40; i++ { // compressible traffic: a probe recovers it
+		send(textPayload)
+	}
+	if compressed == 0 {
+		t.Fatal("gate must resume compression once compressible traffic returns")
+	}
+	if plain <= skipped {
+		t.Fatal("text frames must go uncompressed-never")
 	}
 }
