@@ -34,6 +34,9 @@ func TestGenerateConfigs(t *testing.T) {
 	if server.Key == "" || server.Encrypt == nil || *server.Encrypt == "" {
 		t.Fatal("server secrets missing")
 	}
+	if server.RdnsDomain != "tunnel.example.com" {
+		t.Fatalf("server rdnsdomain=%q want tunnel.example.com", server.RdnsDomain)
+	}
 
 	for _, mode := range clientModes {
 		path := filepath.Join(dir, mode.File)
@@ -74,8 +77,14 @@ func TestDefaultListenAndServerAddrs(t *testing.T) {
 	if got := defaultListenAddr("ricmp", 2); got != "0.0.0.0" {
 		t.Fatalf("ricmp listen=%s", got)
 	}
+	if got := defaultListenAddr("rdns", 6); got != ":53" {
+		t.Fatalf("rdns listen=%s", got)
+	}
 	if got := defaultServerAddr("tcp", "127.0.0.1", 0); got != "127.0.0.1:8888" {
 		t.Fatalf("tcp server=%s", got)
+	}
+	if got := defaultServerAddr("rdns", "127.0.0.1", 6); got != "127.0.0.1:53" {
+		t.Fatalf("rdns server=%s", got)
 	}
 	if got := defaultServerAddr("ricmp", "127.0.0.1", 0); got != "127.0.0.1" {
 		t.Fatalf("ricmp server=%s", got)

@@ -34,7 +34,7 @@ This document provides a comprehensive guide on configuring, running, and deploy
 
 SPP is designed to route and forward network traffic across diverse network environments and protocol boundaries. It supports:
 - **Proxy Protocols**: TCP, UDP
-- **Transit Protocols**: TCP, UDP, RUDP (Reliable UDP), RICMP (Reliable ICMP), RHTTP (Reliable HTTP), KCP, QUIC
+- **Transit Protocols**: TCP, UDP, RUDP (Reliable UDP), RICMP (Reliable ICMP), RHTTP (Reliable HTTP), KCP, QUIC, RDNS (Reliable DNS tunnel)
 - **Proxy Types**: Forward Proxy, Reverse Proxy, SOCKS5 Forward Proxy, SOCKS5 Reverse Proxy, HTTP/HTTPS Forward Proxy, HTTP/HTTPS Reverse Proxy, Shadowsocks plugin mode
 
 ---
@@ -217,6 +217,14 @@ External proxy protocols and internal transit protocols can be converted automat
   ./spp -name "test" -type proxy_client -server www.server.com:8888 -fromaddr :8080 -toaddr :8080 -proxyproto udp -proto kcp -key <key> -kcpfecdata 10 -kcpfecparity 3
   ```
 
+* **Proxy traffic over DNS queries and responses (RDNS):**
+  ```bash
+  # DNS tunnel option: encapsulates frames in DNS TXT or NULL records.
+  # Requires a configured tunnel domain (e.g. tunnel.example.com).
+  ./spp -type server -proto rdns -listen :53 -key <key> -rdnsdomain tunnel.example.com
+  ./spp -name "test" -type socks5_client -server 1.2.3.4:53 -fromaddr :1080 -proxyproto tcp -proto rdns -key <key> -rdnsdomain tunnel.example.com
+  ```
+
 ---
 
 ## Configuration File
@@ -233,7 +241,7 @@ Writes these files (shared random auth/encrypt keys):
 
 | File | Role |
 | :--- | :--- |
-| `config_server.json` | Server listening on **all** main channels (`tcp`/`rudp`/`ricmp`/`kcp`/`quic`/`rhttp`) |
+| `config_server.json` | Server listening on **all** main channels (`tcp`/`rudp`/`ricmp`/`kcp`/`quic`/`rhttp`/`rdns`) |
 | `config_proxy_client.json` | Forward proxy (`:8080` → `:8080`) |
 | `config_reverse_proxy_client.json` | Reverse proxy |
 | `config_socks5_client.json` | SOCKS5 on `:1080` |
@@ -278,6 +286,10 @@ Then:
 | `kcpfecdata` | integer | KCP FEC data shards (e.g. `10`); `0` disables FEC. Must match on both ends |
 | `kcpfecparity` | integer | KCP FEC parity shards (e.g. `3`); `0` disables FEC. `kcpfecdata` + `kcpfecparity` must not exceed 256 |
 | `statusaddr` | string | HTTP health/status listen address (e.g. `127.0.0.1:6060`); omit/empty disables |
+| `rdnsdomain` | string | RDNS base tunnel domain (e.g. `tunnel.example.com`); required when using `rdns` proto |
+| `rdnsupstream` | string | RDNS upstream DNS server for non-tunnel queries |
+| `rdnspsk` | string | RDNS underlay AES-GCM PSK payload encryption |
+| `rdnsquerytype` | string | RDNS query type: `TXT` (default) or `NULL` |
 
 ### Server Example
 
@@ -336,7 +348,7 @@ Usage of spp:
   -config string
         Path to json configuration file
   -proto value
-        Transit protocol: [tcp udp rudp ricmp rhttp kcp quic]
+        Transit protocol: [tcp rudp ricmp kcp quic rhttp rdns]
         (server may repeat with -listen; client takes exactly one)
   -proxyproto value
         Proxy protocol: [tcp udp]
@@ -356,6 +368,14 @@ Usage of spp:
         Encryption type: none/aes-gcm/chacha20 (default "chacha20")
   -compress int
         Minimum payload size in bytes to compress (default 128, 0 disables)
+  -rdnsdomain string
+        RDNS base tunnel domain (e.g. tunnel.example.com); required when using rdns proto
+  -rdnsupstream string
+        RDNS upstream DNS server for non-tunnel queries
+  -rdnspsk string
+        RDNS underlay AES-GCM PSK payload encryption
+  -rdnsquerytype string
+        RDNS query type: TXT (default) or NULL
   -loglevel string
         Log level: debug, info, warn, error (default "info")
   -nolog int
@@ -450,8 +470,8 @@ SPP works over IPv6 for all address-bearing options (`-listen`, `-server`,
   and the relay address returned to the client is reachable over that family.
 * **HTTP proxy**: `CONNECT [host]:port` and absolute-form requests with
   bracketed IPv6 targets are supported.
-* **Transit protocols**: all of `tcp`, `rudp`, `kcp`, `quic`, `rhttp`, and
-  `ricmp` run over both IPv4 and IPv6. Because ICMP carries no port, `ricmp`
+* **Transit protocols**: all of `tcp`, `rudp`, `kcp`, `quic`, `rhttp`,
+  `rdns`, and `ricmp` run over both IPv4 and IPv6. Because ICMP carries no port, `ricmp`
   addresses are host-only: on the client use a bare IPv6 literal without
   brackets (`-server 2001:db8::1`, or a link-local form such as
   `fe80::1%eth0`). On the server, `-listen 0.0.0.0` / `-listen ::` opens both

@@ -59,6 +59,8 @@ func defaultListenAddr(proto string, index int) string {
 		return ":8891"
 	case "rhttp":
 		return ":8892"
+	case "rdns":
+		return ":53"
 	default:
 		return fmt.Sprintf(":%d", 8888+index)
 	}
@@ -120,6 +122,7 @@ func defaultServerConfig(key, encrypt string) ConfigFile {
 	cfg.Type = "server"
 	cfg.Proto = protos
 	cfg.Listen = allMainListens(protos)
+	cfg.RdnsDomain = "tunnel.example.com"
 	return cfg
 }
 

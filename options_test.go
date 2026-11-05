@@ -75,11 +75,36 @@ func TestValidateStartup(t *testing.T) {
 		fromaddr:   []string{":1", ":2"},
 		toaddr:     []string{":3", ":4"},
 	}, []string{"tcp"})
+	ok(startupOptions{ // rdns server with explicit domain
+		typ:         "server",
+		protos:      []string{"rdns"},
+		listenaddrs: []string{":53"},
+		rdnsdomain:  "tunnel.example.com",
+	}, []string{"rdns"})
+	ok(startupOptions{ // rdns client with explicit domain
+		typ:        "proxy_client",
+		protos:     []string{"rdns"},
+		servers:    []string{"127.0.0.1:53"},
+		proxyproto: []string{"tcp"},
+		fromaddr:   []string{":8080"},
+		toaddr:     []string{":8080"},
+		rdnsdomain: "tunnel.example.com",
+	}, []string{"rdns"})
 
 	// ---- invalid type / proto ----
 	wantErr(startupOptions{typ: "bogus", protos: []string{"tcp"}, servers: []string{"h:1"}}, "[type]")
 	wantErr(startupOptions{typ: "server", protos: []string{"carrier-pigeon"}, listenaddrs: []string{":1"}}, "[proto]")
 	wantErr(startupOptions{typ: "proxy_client", protos: []string{"tcp"}, servers: []string{"h:1"}, proxyproto: []string{"sctp"}, fromaddr: []string{":1"}, toaddr: []string{":2"}}, "[proxyproto]")
+	wantErr(startupOptions{typ: "server", protos: []string{"rdns"}, listenaddrs: []string{":53"}}, "rdns requires [rdnsdomain]")
+	wantErr(startupOptions{typ: "server", protos: []string{"rdns"}, listenaddrs: []string{":53"}, rdnsdomain: "   "}, "rdns requires [rdnsdomain]")
+	wantErr(startupOptions{
+		typ:        "proxy_client",
+		protos:     []string{"rdns"},
+		servers:    []string{"127.0.0.1:53"},
+		proxyproto: []string{"tcp"},
+		fromaddr:   []string{":8080"},
+		toaddr:     []string{":8080"},
+	}, "rdns requires [rdnsdomain]")
 
 	// ---- server pairing ----
 	wantErr(startupOptions{typ: "server", protos: []string{"tcp", "rudp"}, listenaddrs: []string{":1"}}, "[proto] [listen]")

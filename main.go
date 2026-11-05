@@ -116,6 +116,10 @@ type ConfigFile struct {
 	KcpFecData   *int     `json:"kcpfecdata,omitempty"`
 	KcpFecParity *int     `json:"kcpfecparity,omitempty"`
 	StatusAddr   string   `json:"statusaddr,omitempty"`
+	RdnsDomain   string   `json:"rdnsdomain,omitempty"`
+	RdnsUpstream string   `json:"rdnsupstream,omitempty"`
+	RdnsPsk      string   `json:"rdnspsk,omitempty"`
+	RdnsQueryType string  `json:"rdnsquerytype,omitempty"`
 }
 
 func loadConfigFile(filePath string) (*ConfigFile, error) {
@@ -186,6 +190,10 @@ func runMain(args []string) int {
 	kcpfecdata := fs.Int("kcpfecdata", 0, "KCP FEC data shards (0 disables FEC; e.g. 10); client and server must match")
 	kcpfecparity := fs.Int("kcpfecparity", 0, "KCP FEC parity shards (0 disables FEC; e.g. 3); client and server must match")
 	statusAddr := fs.String("statusaddr", "", "HTTP health/status listen address (e.g. 127.0.0.1:6060), empty disables; serves /healthz and /status")
+	rdnsdomain := fs.String("rdnsdomain", "", "RDNS base tunnel domain (e.g. tunnel.example.com); required when using rdns proto")
+	rdnsupstream := fs.String("rdnsupstream", "", "RDNS upstream DNS server for non-tunnel queries")
+	rdnspsk := fs.String("rdnspsk", "", "RDNS underlay AES-GCM PSK payload encryption")
+	rdnsquerytype := fs.String("rdnsquerytype", "", "RDNS query type: TXT (default) or NULL")
 
 	if err := fs.Parse(args); err != nil {
 		return 2
@@ -287,6 +295,18 @@ func runMain(args []string) int {
 		if !cliSet["statusaddr"] && fileCfg.StatusAddr != "" {
 			*statusAddr = fileCfg.StatusAddr
 		}
+		if !cliSet["rdnsdomain"] && fileCfg.RdnsDomain != "" {
+			*rdnsdomain = fileCfg.RdnsDomain
+		}
+		if !cliSet["rdnsupstream"] && fileCfg.RdnsUpstream != "" {
+			*rdnsupstream = fileCfg.RdnsUpstream
+		}
+		if !cliSet["rdnspsk"] && fileCfg.RdnsPsk != "" {
+			*rdnspsk = fileCfg.RdnsPsk
+		}
+		if !cliSet["rdnsquerytype"] && fileCfg.RdnsQueryType != "" {
+			*rdnsquerytype = fileCfg.RdnsQueryType
+		}
 	}
 
 	normalizedProtos, verr := validateStartup(startupOptions{
@@ -297,6 +317,7 @@ func runMain(args []string) int {
 		servers:     servers,
 		fromaddr:    fromaddr,
 		toaddr:      toaddr,
+		rdnsdomain:  *rdnsdomain,
 	})
 	if verr != nil {
 		fmt.Println(verr.Error())
@@ -333,6 +354,12 @@ func runMain(args []string) int {
 	config.Password = *password
 	config.KcpFecDataShards = *kcpfecdata
 	config.KcpFecParityShards = *kcpfecparity
+	config.RdnsDomain = *rdnsdomain
+	config.RdnsUpstream = *rdnsupstream
+	config.RdnsPsk = *rdnspsk
+	if *rdnsquerytype != "" {
+		config.RdnsQueryType = *rdnsquerytype
+	}
 
 	ct, err := proxy.ParseCompressType(*compresstype)
 	if err != nil {

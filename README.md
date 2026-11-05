@@ -40,7 +40,7 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
 
 ## Features
 
-- **Multi-Protocol Transit**: Supports establishing tunnel connections over `TCP`, `UDP`, `RUDP` (Reliable UDP), `RICMP` (Reliable ICMP ping tunnel), `RHTTP` (Reliable HTTP), `KCP`, and `QUIC`.
+- **Multi-Protocol Transit**: Supports establishing tunnel connections over `TCP`, `UDP`, `RUDP` (Reliable UDP), `RICMP` (Reliable ICMP ping tunnel), `RHTTP` (Reliable HTTP), `KCP`, `QUIC`, and `RDNS` (Reliable DNS tunnel).
 - **Protocol Multiplexing & Conversion**: Transparently tunnel `TCP` or `UDP` traffic through any supported reliable transit protocol across network boundaries. Multiple forwarding rules share a single multiplexed transit tunnel.
 - **Versatile Proxy Topologies**:
   - **Forward Proxy**: Expose remote services on a local port.
@@ -109,7 +109,7 @@ Generate an all-protocol server configuration alongside ready-to-use client temp
 ```
 
 This generates paired configurations pre-populated with matching secure random keys:
-- `config_server.json`: Preconfigured with multi-protocol listeners (`tcp`, `rudp`, `ricmp`, `kcp`, `quic`, `rhttp`).
+- `config_server.json`: Preconfigured with multi-protocol listeners (`tcp`, `rudp`, `ricmp`, `kcp`, `quic`, `rhttp`, `rdns`).
 - `config_proxy_client.json`: Forward port proxy client.
 - `config_reverse_proxy_client.json`: Reverse port proxy client.
 - `config_socks5_client.json`: Local SOCKS5 proxy client.
@@ -261,6 +261,16 @@ SPP allows wrapping application traffic (`proxyproto`) inside any supported tran
 
   # Client connecting via ICMP
   ./spp -type socks5_client -proto ricmp -server www.server.com \
+    -fromaddr :1080 -proxyproto tcp -key "your-key" -encrypt "your-key"
+  ```
+
+- **Tunnel over DNS Queries/Responses (RDNS, bypasses restrictive firewalls):**
+  ```bash
+  # Server listening on DNS port 53 (requires root/CAP_NET_BIND_SERVICE)
+  ./spp -type server -proto rdns -listen :53 -rdnsdomain "tunnel.example.com" -key "your-key" -encrypt "your-key"
+
+  # Client connecting via DNS server
+  ./spp -type socks5_client -proto rdns -server 1.2.3.4:53 -rdnsdomain "tunnel.example.com" \
     -fromaddr :1080 -proxyproto tcp -key "your-key" -encrypt "your-key"
   ```
 

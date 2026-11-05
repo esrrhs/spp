@@ -96,6 +96,28 @@ func TestConfigFile_StatusAddrRoundTrip(t *testing.T) {
 	}
 }
 
+func TestConfigFile_RdnsFieldsRoundTrip(t *testing.T) {
+	cfg := ConfigFile{
+		Type:          "server",
+		RdnsDomain:    "tunnel.example.com",
+		RdnsUpstream:  "8.8.8.8:53",
+		RdnsPsk:       "my-secret-psk",
+		RdnsQueryType: "NULL",
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var back ConfigFile
+	if err := json.Unmarshal(raw, &back); err != nil {
+		t.Fatal(err)
+	}
+	if back.RdnsDomain != "tunnel.example.com" || back.RdnsUpstream != "8.8.8.8:53" ||
+		back.RdnsPsk != "my-secret-psk" || back.RdnsQueryType != "NULL" {
+		t.Fatalf("rdns fields roundtrip failed: %+v", back)
+	}
+}
+
 func TestLoadConfigFile_Errors(t *testing.T) {
 	if _, err := loadConfigFile(filepath.Join(t.TempDir(), "missing.json")); err == nil {
 		t.Fatal("missing config file must error")

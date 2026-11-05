@@ -41,6 +41,10 @@ type Config struct {
 	Congestion                string        // 拥塞算法
 	KcpFecDataShards          int           // KCP FEC 数据分片数，0 关闭 FEC；启用时客户端与服务端必须配置一致
 	KcpFecParityShards        int           // KCP FEC 校验分片数，0 关闭 FEC（如 10 数据 +3 校验，约 30% 冗余）
+	RdnsDomain                string        // RDNS 隧道基础域名（例如 tunnel.example.com），使用 rdns 协议时必须配置
+	RdnsUpstream              string        // RDNS 上游 DNS 服务器（保留供递归解析）
+	RdnsPsk                   string        // RDNS 底层 AES-GCM 载荷加密密钥（空表示不启用）
+	RdnsQueryType             string        // RDNS DNS 查询类型，"TXT"（默认）或 "NULL"
 }
 
 func DefaultConfig() *Config {
@@ -64,6 +68,9 @@ func DefaultConfig() *Config {
 		Password:                  "",
 		MainWriteChannelTimeoutMs: 0,
 		Congestion:                "bb",
+		KcpFecDataShards:          0,
+		KcpFecParityShards:        0,
+		RdnsQueryType:             "TXT",
 	}
 }
 
@@ -1662,6 +1669,10 @@ func setCongestion(c network.Conn, config *Config) {
 		cf := c.(*network.RicmpConn).GetConfig()
 		cf.Congestion = config.Congestion
 		c.(*network.RicmpConn).SetConfig(cf)
+	} else if c.Name() == "rdns" {
+		cf := c.(*network.RdnsConn).GetConfig()
+		cf.Congestion = config.Congestion
+		c.(*network.RdnsConn).SetConfig(cf)
 	}
 }
 
@@ -1679,9 +1690,32 @@ func setKcpConfig(c network.Conn, config *Config) {
 	})
 }
 
+// setRdnsConfig applies the RDNS domain and tunnel configuration before Listen/Dial.
+func setRdnsConfig(c network.Conn, config *Config) {
+	if c.Name() != "rdns" {
+		return
+	}
+	rc := c.(*network.RdnsConn)
+	cf := rc.GetConfig()
+	if config.RdnsDomain != "" {
+		cf.Domain = config.RdnsDomain
+	}
+	if config.RdnsUpstream != "" {
+		cf.Upstream = config.RdnsUpstream
+	}
+	if config.RdnsPsk != "" {
+		cf.PSK = config.RdnsPsk
+	}
+	if config.RdnsQueryType != "" {
+		cf.QueryType = config.RdnsQueryType
+	}
+	rc.SetConfig(cf)
+}
+
 // setUnderlayTuning applies all spp-side underlay tuning (congestion
-// control, KCP FEC) to a freshly constructed conn.
+// control, KCP FEC, RDNS) to a freshly constructed conn.
 func setUnderlayTuning(c network.Conn, config *Config) {
 	setCongestion(c, config)
 	setKcpConfig(c, config)
+	setRdnsConfig(c, config)
 }
