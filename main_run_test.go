@@ -383,6 +383,10 @@ func TestRunMain_ConfigFileMergesAllFields(t *testing.T) {
 		"password": "cfgpass",
 		"kcpfecdata": 0,
 		"kcpfecparity": 0,
+		"rdnsdomain": "merge.example.com",
+		"rdnsupstream": "1.1.1.1:53",
+		"rdnspsk": "psk-secret",
+		"rdnsquerytype": "TXT",
 		"statusaddr": "127.0.0.1:` + itoaPort(status) + `"
 	}`
 	path := filepath.Join(t.TempDir(), "full.json")

@@ -192,6 +192,8 @@ func TestIntegration_InvalidArgsExitWithoutServing(t *testing.T) {
 			"-proxyproto", "tcp", "-key", "it-strong-auth-key"},
 		{"-type", "server", "-proto", "tcp", "-listen", ":1", "-listen", ":2",
 			"-key", "it-strong-auth-key"},
+		{"-type", "server", "-proto", "rdns", "-listen", ":53",
+			"-key", "it-strong-auth-key"},
 	}
 	for _, args := range cases {
 		cmd := newSppCmd(t, args)

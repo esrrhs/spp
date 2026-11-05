@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/esrrhs/gohome/network"
 )
@@ -16,6 +17,7 @@ type startupOptions struct {
 	servers     []string
 	fromaddr    []string
 	toaddr      []string
+	rdnsdomain  string
 }
 
 // validateStartup checks CLI/config consistency and returns the normalized
@@ -27,6 +29,9 @@ func validateStartup(o startupOptions) ([]string, error) {
 	for _, p := range protos {
 		if !network.HasReliableProto(p) {
 			return nil, fmt.Errorf("[proto] must be %v", network.SupportReliableProtos())
+		}
+		if p == "rdns" && strings.TrimSpace(o.rdnsdomain) == "" {
+			return nil, fmt.Errorf("[proto] rdns requires [rdnsdomain] (e.g. tunnel.example.com)")
 		}
 	}
 	for _, p := range o.proxyproto {
