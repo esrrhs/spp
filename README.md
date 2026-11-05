@@ -321,17 +321,17 @@ Load the configuration file:
 
 Benchmark measurements across supported transit protocols using [connperf](https://github.com/esrrhs/connperf).
 
-The benchmark was performed over a transoceanic public internet link (client in East Asia, server in North America), sending unidirectional traffic for 8 seconds per protocol with fixed 1024-byte payloads. Every transmitted chunk was verified for data integrity by the receiving endpoint.
+The benchmark was performed over a transoceanic public internet link (client in East Asia, server in North America), evaluating both downstream (Server -> Client, representing typical proxy download traffic) and upstream (Client -> Server) throughput with fixed 1024-byte payloads for ~8 seconds per protocol. Every transmitted chunk was verified for data integrity by the receiving endpoint.
 
-| Protocol | Peak Speed | Average Speed | Verification | Characteristics & Observations |
+| Protocol | Downlink (Server -> Client) Peak / Avg | Uplink (Client -> Server) Peak / Avg | Verification | Characteristics & Observations |
 | :--- | :--- | :--- | :--- | :--- |
-| **KCP** | 19.12 MB/s (153 Mbps) | 15.53 MB/s | Passed | Highest throughput across high-latency, lossy transoceanic paths |
-| **QUIC** | 18.44 MB/s (147 Mbps) | 8.19 MB/s | Passed | Fast 0/1-RTT handshake, high peak burst capacity |
-| **TCP** | 12.64 MB/s (101 Mbps) | 7.81 MB/s | Passed | Standard baseline performance over wide-area internet |
-| **RUDP** | 10.43 MB/s (83 Mbps) | 4.51 MB/s | Passed | Reliable UDP packet delivery with lightweight sliding window |
-| **RICMP** | 10.83 MB/s (87 Mbps) | 3.60 MB/s | Passed | ICMP ping tunnel; bypasses restrictive TCP/UDP firewalls |
-| **RHTTP** | 1.20 MB/s (9.6 Mbps) | 0.51 MB/s | Passed | HTTP-encapsulated tunnel; traverses strict web proxies |
-| **RDNS** | 0.40 MB/s (3.2 Mbps) | 0.05 MB/s | Passed | DNS tunnel; bypasses captive portals and DNS-only egress |
+| **KCP** | 10.12 MB/s (81 Mbps) / 5.05 MB/s | 19.12 MB/s (153 Mbps) / 15.53 MB/s | Passed | Best overall bidirectional throughput across lossy transoceanic links |
+| **RICMP** | 11.08 MB/s (89 Mbps) / 5.49 MB/s | 10.83 MB/s (87 Mbps) / 3.60 MB/s | Passed | ICMP ping tunnel; high and balanced throughput, bypasses TCP/UDP blocking |
+| **RUDP** | 10.00 MB/s (80 Mbps) / 3.57 MB/s | 10.43 MB/s (83 Mbps) / 4.51 MB/s | Passed | Reliable UDP packet delivery with lightweight sliding window |
+| **TCP** | 3.77 MB/s (30 Mbps) / 1.97 MB/s | 12.64 MB/s (101 Mbps) / 7.81 MB/s | Passed | Standard baseline; downlink throughput affected by cross-border latency & congestion |
+| **QUIC** | 0.13 MB/s (1.0 Mbps) / 0.03 MB/s | 18.44 MB/s (147 Mbps) / 8.19 MB/s | Passed | Fast handshake and high uplink; inbound UDP throttled by wide-area ISP QoS |
+| **RHTTP** | 0.10 MB/s (0.8 Mbps) / 0.04 MB/s | 1.20 MB/s (9.6 Mbps) / 0.51 MB/s | Passed | HTTP-encapsulated tunnel; traverses strict corporate and web proxies |
+| **RDNS** | 0.40 MB/s (3.2 Mbps) / 0.06 MB/s | 0.40 MB/s (3.2 Mbps) / 0.05 MB/s | Passed | DNS tunnel; bypasses captive portals and DNS-only restricted environments |
 
 ---
 
