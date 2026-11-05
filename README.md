@@ -28,7 +28,7 @@ SPP is a versatile, high-performance network proxy and traffic-forwarding tool w
   - [NAT Traversal / Intranet Penetration (Reverse Proxy)](#nat-traversal--intranet-penetration-reverse-proxy)
   - [SOCKS5 Proxy (Forward & Reverse)](#socks5-proxy-forward--reverse)
   - [HTTP / HTTPS Proxy (Forward & Reverse)](#http--https-proxy-forward--reverse)
-  - [Cross-Protocol Tunneling (QUIC / KCP / RUDP / RICMP)](#cross-protocol-tunneling-quic--kcp--rudp--ricmp)
+  - [Cross-Protocol Tunneling (QUIC / KCP / RUDP / RICMP / RHTTP / RDNS)](#cross-protocol-tunneling-quic--kcp--rudp--ricmp--rhttp--rdns)
 - [Configuration Files](#configuration-files)
 - [Performance & Benchmark](#performance--benchmark)
 - [Health Check & Monitoring](#health-check--monitoring)
@@ -234,7 +234,7 @@ Open an HTTP proxy port on the public server that tunnels traffic out through th
   -key "your-auth-key" -encrypt "your-encrypt-key"
 ```
 
-### Cross-Protocol Tunneling (QUIC / KCP / RUDP / RICMP)
+### Cross-Protocol Tunneling (QUIC / KCP / RUDP / RICMP / RHTTP / RDNS)
 
 SPP allows wrapping application traffic (`proxyproto`) inside any supported transit protocol (`proto`).
 
@@ -254,6 +254,13 @@ SPP allows wrapping application traffic (`proxyproto`) inside any supported tran
     -key "your-auth-key" -encrypt "your-encrypt-key"
   ```
 
+- **Tunnel over Reliable UDP (RUDP):**
+  ```bash
+  ./spp -type proxy_client -proto rudp -server www.server.com:9999 \
+    -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
+    -key "your-auth-key" -encrypt "your-encrypt-key"
+  ```
+
 - **Tunnel over ICMP Echo Ping (RICMP, bypasses TCP/UDP blocking):**
   ```bash
   # Server listening on ICMP (requires root/CAP_NET_RAW)
@@ -264,13 +271,21 @@ SPP allows wrapping application traffic (`proxyproto`) inside any supported tran
     -fromaddr :1080 -proxyproto tcp -key "your-key" -encrypt "your-key"
   ```
 
+- **Tunnel over Reliable HTTP (RHTTP):**
+  ```bash
+  ./spp -type proxy_client -proto rhttp -server www.server.com:8888 \
+    -fromaddr :8080 -toaddr :8080 -proxyproto tcp \
+    -key "your-auth-key" -encrypt "your-encrypt-key"
+  ```
+
 - **Tunnel over DNS Queries/Responses (RDNS, bypasses restrictive firewalls):**
   ```bash
   # Server listening on DNS port 53 (requires root/CAP_NET_BIND_SERVICE)
-  ./spp -type server -proto rdns -listen :53 -rdnsdomain "tunnel.example.com" -key "your-key" -encrypt "your-key"
+  ./spp -type server -proto rdns -listen :53 -rdnsdomain "tunnel.example.com" \
+    -key "your-key" -encrypt "your-key"
 
-  # Client connecting via DNS server
-  ./spp -type socks5_client -proto rdns -server 1.2.3.4:53 -rdnsdomain "tunnel.example.com" \
+  # Client connecting via public recursive DNS (e.g. 114.114.114.114 or 8.8.8.8)
+  ./spp -type socks5_client -proto rdns -server 114.114.114.114:53 -rdnsdomain "tunnel.example.com" \
     -fromaddr :1080 -proxyproto tcp -key "your-key" -encrypt "your-key"
   ```
 
