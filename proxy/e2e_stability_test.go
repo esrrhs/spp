@@ -557,8 +557,8 @@ func TestE2E_NarrowPipe_HeavyBackpressure(t *testing.T) {
 // timeout windows, verifying byte-for-byte SHA-256 integrity.
 func TestE2E_LargeStream_1GB_UploadAndDownload(t *testing.T) {
 	const (
-		oneGiB            = int64(1) << 30    // 1,073,741,824 bytes (1 GiB)
-		throttleRateBps   = 220 * 1024 * 1024 // ~220 MiB/s -> ~4.7s per 1 GiB (>2x the 2s PingTimeoutInter)
+		oneGiB          = int64(1) << 30    // 1,073,741,824 bytes (1 GiB)
+		throttleRateBps = 220 * 1024 * 1024 // ~220 MiB/s -> ~4.7s per 1 GiB (>2x the 2s PingTimeoutInter)
 	)
 	targetAddr, stopTarget := startStreamVerifyServer(t, throttleRateBps)
 	defer stopTarget()
@@ -765,3 +765,90 @@ func TestE2E_InteractiveWebWhileBulkDownloadSaturatesPipe(t *testing.T) {
 	}
 }
 
+// TestE2E_ThroughputStability verifies that sustained streaming over RUDP
+// saturates available throughput and maintains stable high-speed transfer
+// across successive measurement windows without collapses or stalls.
+func TestE2E_ThroughputStability(t *testing.T) {
+	for _, proto := range []string{"rudp"} {
+		proto := proto
+		t.Run(proto, func(t *testing.T) {
+			targetAddr, stopTarget := startStreamVerifyServer(t, 0)
+			defer stopTarget()
+
+			cfg := testConfig("throughput-stability-" + proto)
+			cfg.ConnBuffer = 16
+			cfg.MainBuffer = 32
+			cfg.PingInter = 1
+			cfg.PingTimeoutInter = 5
+
+			h := startSocks5Proxy(t, proto, cfg)
+			defer h.Close()
+
+			conn := socks5Connect(t, h.clientAddr, targetAddr, 10*time.Second)
+			defer conn.Close()
+			_ = conn.SetDeadline(time.Now().Add(30 * time.Second))
+
+			const totalBytes = int64(256 * 1024 * 1024)
+			hdr := putStreamHeader('D', totalBytes)
+			if _, err := conn.Write(hdr[:]); err != nil {
+				t.Fatalf("write download header: %v", err)
+			}
+
+			buf := make([]byte, 64*1024)
+			var received int64
+			var secRates []float64
+			secStart := time.Now()
+			var currentSecBytes int64
+
+			for received < totalBytes {
+				n, err := conn.Read(buf)
+				if n > 0 {
+					received += int64(n)
+					currentSecBytes += int64(n)
+				}
+				if time.Since(secStart) >= time.Second {
+					dur := time.Since(secStart)
+					rateMB := float64(currentSecBytes) / (1024 * 1024) / dur.Seconds()
+					secRates = append(secRates, rateMB)
+					t.Logf("[%s] sec %d: %.2f MB/s (%d bytes)", proto, len(secRates), rateMB, currentSecBytes)
+					secStart = time.Now()
+					currentSecBytes = 0
+				}
+				if err != nil {
+					if err == io.EOF && received == totalBytes {
+						break
+					}
+					t.Fatalf("download read failed at %d/%d: %v", received, totalBytes, err)
+				}
+			}
+
+			t.Logf("[%s] completed %d bytes across %d full-second sampling intervals", proto, received, len(secRates))
+			if len(secRates) >= 2 {
+				steadyRates := secRates[1:]
+				var minRate, maxRate, totalSteady float64
+				minRate = steadyRates[0]
+				maxRate = steadyRates[0]
+				for _, r := range steadyRates {
+					if r < minRate {
+						minRate = r
+					}
+					if r > maxRate {
+						maxRate = r
+					}
+					totalSteady += r
+				}
+				avgRate := totalSteady / float64(len(steadyRates))
+				stabilityRatio := minRate / avgRate
+				t.Logf("[%s] steady avg: %.2f MB/s, min: %.2f MB/s, max: %.2f MB/s, stability ratio: %.2f",
+					proto, avgRate, minRate, maxRate, stabilityRatio)
+
+				if minRate < 2.0 {
+					t.Fatalf("[%s] throughput collapsed to %.2f MB/s (< 2 MB/s baseline)", proto, minRate)
+				}
+				if stabilityRatio < 0.40 {
+					t.Fatalf("[%s] throughput unstable: min/avg ratio %.2f < 0.40", proto, stabilityRatio)
+				}
+			}
+		})
+	}
+}
