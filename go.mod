@@ -3,7 +3,7 @@ module github.com/esrrhs/spp
 go 1.27.3
 
 require (
-	github.com/esrrhs/gohome v0.0.0-20261105070722-909c7d106b1f
+	github.com/esrrhs/gohome v0.0.0-20261106024440-da7912ccb93e
 	github.com/klauspost/compress v1.20.3
 	golang.org/x/crypto v0.58.0
 	golang.org/x/sys v0.49.0
