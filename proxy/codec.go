@@ -293,7 +293,7 @@ type compressGate struct {
 const (
 	gateFailThreshold = 8   // consecutive failures before skipping
 	gateSkipFrames    = 128 // frames to skip before full re-probing
-	gateProbeInterval = 16  // while skipping, still try every 16th frame
+	gateProbeInterval = 64  // while skipping, still try every 64th frame
 )
 
 // allow reports whether this frame should attempt compression. nil disables
