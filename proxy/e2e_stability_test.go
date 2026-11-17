@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"strings"
 	"sync"
@@ -850,5 +851,186 @@ func TestE2E_ThroughputStability(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// startUDPCrossOceanRelay runs an in-process UDP relay that injects one-way
+// propagation delay and random packet loss in both directions to simulate a
+// cross-ocean RUDP link without requiring root or kernel tc netem.
+func startUDPCrossOceanRelay(t *testing.T, backend string, oneWayDelay time.Duration, lossRate float64, seed int64) (relayAddr string, stop func()) {
+	t.Helper()
+	backAddr, err := net.ResolveUDPAddr("udp", backend)
+	if err != nil {
+		t.Fatalf("resolve backend UDP addr %s: %v", backend, err)
+	}
+	pc, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatalf("listen UDP relay: %v", err)
+	}
+	_ = pc.SetReadBuffer(8 << 20)
+	_ = pc.SetWriteBuffer(8 << 20)
+
+	rng := rand.New(rand.NewSource(seed))
+	var mu sync.Mutex
+	var writeMu sync.Mutex
+	var clientAddr *net.UDPAddr
+	var closed atomic.Bool
+	var wg sync.WaitGroup
+
+	forward := func(pkt []byte, dst *net.UDPAddr) {
+		if dst == nil || closed.Load() {
+			return
+		}
+		wg.Add(1)
+		time.AfterFunc(oneWayDelay, func() {
+			defer wg.Done()
+			if closed.Load() {
+				return
+			}
+			writeMu.Lock()
+			_, _ = pc.WriteToUDP(pkt, dst)
+			writeMu.Unlock()
+		})
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		buf := make([]byte, 65535)
+		for !closed.Load() {
+			_ = pc.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			n, addr, rerr := pc.ReadFromUDP(buf)
+			if closed.Load() {
+				return
+			}
+			if rerr != nil {
+				continue
+			}
+			fromBackend := addr.IP.Equal(backAddr.IP) && addr.Port == backAddr.Port
+			pkt := append([]byte(nil), buf[:n]...)
+			mu.Lock()
+			drop := lossRate > 0 && rng.Float64() < lossRate
+			if fromBackend {
+				ca := clientAddr
+				mu.Unlock()
+				if ca != nil && !drop {
+					forward(pkt, ca)
+				}
+				continue
+			}
+			if clientAddr == nil {
+				cp := *addr
+				clientAddr = &cp
+			}
+			mu.Unlock()
+			if !drop {
+				forward(pkt, backAddr)
+			}
+		}
+	}()
+
+	stop = func() {
+		if closed.Swap(true) {
+			return
+		}
+		_ = pc.Close()
+		wg.Wait()
+	}
+	return pc.LocalAddr().String(), stop
+}
+
+// TestE2E_CrossOceanRudpThroughputRedline simulates an end-to-end SOCKS5 single-stream
+// download over a cross-ocean RUDP link (120ms RTT + 3% random packet loss) with
+// compression disabled so every byte traverses the wire and flow-control window.
+// Fails if single-stream goodput drops below the redline (e.g. if the per-sonny
+// window or RUDP loss-compensated congestion control regresses).
+func TestE2E_CrossOceanRudpThroughputRedline(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cross-ocean E2E throughput redline test in short mode")
+	}
+
+	targetAddr, stopTarget := startStreamVerifyServer(t, 0)
+	defer stopTarget()
+
+	cfg := DefaultConfig()
+	cfg.Key = "cross-ocean-rudp-redline-key-2026"
+	cfg.Compress = 0 // disable compression so all payload bytes traverse RUDP wire
+
+	serverBind := freeListenAddr(t, "rudp")
+	srv, err := NewServer(cfg, []string{"rudp"}, []string{serverBind})
+	if err != nil {
+		t.Fatalf("NewServer(rudp): %v", err)
+	}
+	defer srv.Close()
+
+	// Simulate cross-ocean link: 60ms one-way delay (120ms RTT) + 3% random UDP loss.
+	relayAddr, stopRelay := startUDPCrossOceanRelay(t, serverBind, 60*time.Millisecond, 0.03, 20261117)
+	defer stopRelay()
+
+	clientAddr := fmt.Sprintf("127.0.0.1:%d", getFreePort(t))
+	cli, err := NewClient(cfg, "rudp", relayAddr, "e2e_crossocean_rudp", "SOCKS5", []string{"tcp"}, []string{clientAddr}, nil)
+	if err != nil {
+		t.Fatalf("NewClient(rudp): %v", err)
+	}
+	defer cli.Close()
+
+	probeConn, err := waitForPort(clientAddr, 15*time.Second)
+	if err != nil {
+		t.Fatalf("waitForPort(%s): %v", clientAddr, err)
+	}
+	probeConn.Close()
+
+	conn := socks5Connect(t, clientAddr, targetAddr, 15*time.Second)
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(45 * time.Second))
+
+	const (
+		totalBytes  = int64(24 * 1024 * 1024) // 24 MiB single-stream download
+		redlineMBps = 4.0                     // minimum acceptable single-stream throughput (32 Mbps)
+	)
+	hdr := putStreamHeader('D', totalBytes)
+	if _, err := conn.Write(hdr[:]); err != nil {
+		t.Fatalf("write download header: %v", err)
+	}
+
+	wantHash := sha256.New()
+	expectedChunk := make([]byte, 64*1024)
+	for i := int64(0); i < totalBytes/(64*1024); i++ {
+		fillPattern(expectedChunk, byte(i))
+		_, _ = wantHash.Write(expectedChunk)
+	}
+
+	gotHash := sha256.New()
+	buf := make([]byte, 64*1024)
+	var received int64
+	start := time.Now()
+	for received < totalBytes {
+		n, rerr := conn.Read(buf)
+		if n > 0 {
+			_, _ = gotHash.Write(buf[:n])
+			received += int64(n)
+		}
+		if rerr != nil {
+			if rerr == io.EOF && received == totalBytes {
+				break
+			}
+			t.Fatalf("cross-ocean download read failed at %d/%d: %v", received, totalBytes, rerr)
+		}
+	}
+	elapsed := time.Since(start)
+
+	var gotSum, wantSum [32]byte
+	copy(gotSum[:], gotHash.Sum(nil))
+	copy(wantSum[:], wantHash.Sum(nil))
+	if gotSum != wantSum {
+		t.Fatalf("cross-ocean download sha256 mismatch: got %x, want %x", gotSum, wantSum)
+	}
+
+	mbps := float64(received) / (1024 * 1024) / elapsed.Seconds()
+	t.Logf("[rudp cross-ocean 120ms RTT, 3%% loss] single-stream download: %.2f MB/s (%.2f Mbps, %d bytes in %s)",
+		mbps, mbps*8, received, elapsed)
+	if mbps < redlineMBps {
+		t.Fatalf("single-stream cross-ocean download throughput %.2f MB/s fell below redline %.2f MB/s",
+			mbps, redlineMBps)
 	}
 }

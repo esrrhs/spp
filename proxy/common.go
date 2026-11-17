@@ -50,8 +50,8 @@ type Config struct {
 func DefaultConfig() *Config {
 	return &Config{
 		MaxMsgSize:                1024 * 1024,
-		MainBuffer:                128,
-		ConnBuffer:                32,
+		MainBuffer:                512,
+		ConnBuffer:                128,
 		EstablishedTimeout:        120,
 		AuthTimeout:               15,
 		PingInter:                 1,
@@ -235,24 +235,32 @@ func (p *ProxyConn) isNeedClose() bool {
 }
 
 func sonnyWindowFrames(connBuf int) int {
-	w := connBuf * 2
-	if w < 16 {
-		w = 16
+	if connBuf <= 16 {
+		w := connBuf * 2
+		if w < 16 {
+			w = 16
+		}
+		return w
 	}
-	if w > 64 {
-		w = 64
+	w := connBuf * 12
+	if w > 512 {
+		w = 512
 	}
 	return w
 }
 
 func (p *ProxyConn) initSendWindow(connBuf int) {
 	w := sonnyWindowFrames(connBuf)
+	frameBytes := int64(windowBytesPerFrame)
+	if connBuf >= 32 {
+		frameBytes = MAX_CHUNK_SIZE
+	}
 	p.winMu.Lock()
 	if p.winCond == nil {
 		p.winCond = sync.NewCond(&p.winMu)
 	}
 	atomic.StoreInt32(&p.maxWinFrames, int32(w))
-	atomic.StoreInt64(&p.maxWinBytes, int64(w)*windowBytesPerFrame)
+	atomic.StoreInt64(&p.maxWinBytes, int64(w)*frameBytes)
 	p.winMu.Unlock()
 }
 
@@ -773,7 +781,7 @@ func recvFrom(wg *thread.Group, proxyconn *ProxyConn, conn network.Conn, maxmsgs
 	// buffer bypass it and read straight into ds, so large frames still cost
 	// one syscall. Message-oriented transports (rudp/kcp/quic) just coalesce
 	// their refills the same way. recvFrom is the conn's only reader.
-	const recvBufSize = 64 * 1024
+	const recvBufSize = 128 * 1024
 	br := bufio.NewReaderSize(conn, recvBufSize)
 	bs := make([]byte, 4)
 	ds := make([]byte, maxmsgsize+MAX_PROTO_PACK_SIZE+aeadOverhead)
@@ -931,8 +939,8 @@ func sendTo(wg *thread.Group, sendq *prioQueue, proxyconn *ProxyConn, conn netwo
 			f, pv = frameAndPooled(v)
 		}
 
-		const batchMaxFrames = 16
-		const batchMaxBytes = 64 * 1024
+		const batchMaxFrames = 32
+		const batchMaxBytes = 128 * 1024
 		wire = wire[:0]
 		nbatch := 0
 		pingSolo := f.Type == FRAME_TYPE_PING || f.Type == FRAME_TYPE_PONG
@@ -1145,9 +1153,15 @@ func sendToSonny(wg *thread.Group, proxyconn *ProxyConn, father *ProxyConn, send
 		proxyconn.winMu.Lock()
 		if atomic.LoadInt32(&proxyconn.maxWinFrames) >= 4 {
 			stepFrames = atomic.LoadInt32(&proxyconn.maxWinFrames) / 4
+			if stepFrames > 64 {
+				stepFrames = 64
+			}
 		}
 		if atomic.LoadInt64(&proxyconn.maxWinBytes) >= 4*MAX_CHUNK_SIZE {
 			stepBytes = atomic.LoadInt64(&proxyconn.maxWinBytes) / 4
+			if stepBytes > 1024*1024 {
+				stepBytes = 1024 * 1024
+			}
 		}
 		proxyconn.winMu.Unlock()
 	}
