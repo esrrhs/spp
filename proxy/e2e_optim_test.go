@@ -75,14 +75,16 @@ func TestE2E_CompressGate_DynamicTrafficTransition(t *testing.T) {
 
 	savedBefore := atomic.LoadInt64(&gState.SendCompSaveSize)
 
-	// Phase 2: Highly compressible text frames (32 frames x 8KB = 256KB).
-	// Because skip mode probes every 16 frames, within 16 frames the gate probe
-	// encounters compressible data, resets failure/skip counts, and re-engages compression.
+	// Phase 2: Highly compressible text frames (gateProbeInterval + 16 frames x 8KB).
+	// Because skip mode probes every gateProbeInterval frames, within gateProbeInterval
+	// frames the gate probe encounters compressible data, resets failure/skip counts,
+	// and re-engages compression.
 	textPattern := []byte("SPP-COMPRESS-GATE-DYNAMIC-E2E-TEST-PATTERN-REPEATED-")
 	textChunk := bytes.Repeat(textPattern, (8192/len(textPattern))+1)[:8192]
 	textHash := sha256.Sum256(textChunk)
 
-	for i := 0; i < 32; i++ {
+	phase2Frames := gateProbeInterval + 16
+	for i := 0; i < phase2Frames; i++ {
 		if _, err := conn.Write(textChunk); err != nil {
 			t.Fatalf("phase 2 write %d: %v", i, err)
 		}
